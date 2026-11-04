@@ -142,6 +142,17 @@ func RegisterUserRoutes(
 			subscriptions.GET("/summary", h.Subscription.GetSummary)
 		}
 
+		// 拼车：仅车内成员可见，manager 可调整本车账号与额度
+		if h.Carpool != nil {
+			carpools := authenticated.Group("/carpools")
+			{
+				carpools.GET("", h.Carpool.ListMine)
+				carpools.GET("/:id", h.Carpool.GetDetail)
+				carpools.PUT("/:id/quota", h.Carpool.UpdateQuota)
+				carpools.POST("/:id/account/action", h.Carpool.AccountAction)
+			}
+		}
+
 		// 渠道监控（用户只读）
 		monitors := authenticated.Group("/channel-monitors")
 		{

@@ -45,6 +45,9 @@ func RegisterAdminRoutes(
 		// 分组管理
 		registerGroupRoutes(admin, h)
 
+		// 拼车管理
+		registerCarpoolRoutes(admin, h)
+
 		// 账号管理
 		registerAccountRoutes(admin, h, stepUpAuth)
 
@@ -900,5 +903,24 @@ func channelMonitorModeV2Guard(settingService *service.SettingService) gin.Handl
 			return
 		}
 		c.Next()
+	}
+}
+
+func registerCarpoolRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	if h.Carpool == nil {
+		return
+	}
+	carpools := admin.Group("/carpools")
+	{
+		carpools.GET("", h.Carpool.AdminList)
+		carpools.POST("", h.Carpool.AdminCreate)
+		carpools.GET("/:id", h.Carpool.AdminGetDetail)
+		carpools.PUT("/:id", h.Carpool.AdminUpdate)
+		carpools.DELETE("/:id", h.Carpool.AdminDelete)
+		carpools.POST("/:id/members", h.Carpool.AdminAddMember)
+		carpools.PUT("/:id/members/:user_id", h.Carpool.AdminSetMemberRole)
+		carpools.DELETE("/:id/members/:user_id", h.Carpool.AdminRemoveMember)
+		carpools.POST("/:id/renew", h.Carpool.AdminRenew)
+		carpools.POST("/:id/account/action", h.Carpool.AdminAccountAction)
 	}
 }

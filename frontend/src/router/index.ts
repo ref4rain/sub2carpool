@@ -325,6 +325,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/carpool',
+    name: 'Carpool',
+    component: () => import('@/views/user/CarpoolView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: false,
+      title: 'My Carpool',
+      titleKey: 'carpool.title',
+      descriptionKey: 'carpool.description'
+    }
+  },
+  {
     path: '/purchase',
     name: 'PurchaseSubscription',
     component: () => import('@/views/user/PaymentView.vue'),
@@ -534,6 +546,18 @@ const routes: RouteRecordRaw[] = [
       title: 'Subscription Management',
       titleKey: 'admin.subscriptions.title',
       descriptionKey: 'admin.subscriptions.description'
+    }
+  },
+  {
+    path: '/admin/carpools',
+    name: 'AdminCarpools',
+    component: () => import('@/views/admin/CarpoolsView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Carpool Management',
+      titleKey: 'carpool.adminTitle',
+      descriptionKey: 'carpool.adminDescription'
     }
   },
   {

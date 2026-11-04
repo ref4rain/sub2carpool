@@ -439,6 +439,20 @@ func ProvideProxyExpiryService(proxyRepo ProxyRepository) *ProxyExpiryService {
 	return svc
 }
 
+// ProvideCarpoolService creates CarpoolService and starts its weekly quota estimator.
+func ProvideCarpoolService(
+	repo CarpoolRepository,
+	adminService AdminService,
+	subscriptionService *SubscriptionService,
+	accountUsageService *AccountUsageService,
+	rateLimitService *RateLimitService,
+	userRepo UserRepository,
+) *CarpoolService {
+	svc := NewCarpoolService(repo, adminService, subscriptionService, accountUsageService, rateLimitService, userRepo)
+	svc.Start()
+	return svc
+}
+
 // ProvideSubscriptionExpiryService creates and starts SubscriptionExpiryService.
 func ProvideSubscriptionExpiryService(userSubRepo UserSubscriptionRepository, settingRepo SettingRepository, notificationEmailService *NotificationEmailService, lockCache LeaderLockCache, db *sql.DB) *SubscriptionExpiryService {
 	svc := NewSubscriptionExpiryService(userSubRepo, time.Minute)
@@ -881,6 +895,7 @@ var ProviderSet = wire.NewSet(
 	NewBillingService,
 	ProvideBillingCacheService,
 	NewAnnouncementService,
+	ProvideCarpoolService,
 	NewAdminService,
 	NewGatewayService,
 	NewOpenAIGatewayService,
