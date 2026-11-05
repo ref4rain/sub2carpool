@@ -41,7 +41,7 @@ var (
 	ErrCarpoolInvalidSeats     = infraerrors.BadRequest("CARPOOL_INVALID_SEATS", "seats must be between 1 and 10")
 	ErrCarpoolSeatsFull        = infraerrors.BadRequest("CARPOOL_SEATS_FULL", "carpool has no free seat")
 	ErrCarpoolSeatsBelowCount  = infraerrors.BadRequest("CARPOOL_SEATS_BELOW_MEMBERS", "seats cannot be fewer than current members")
-	ErrCarpoolInvalidQuota     = infraerrors.BadRequest("CARPOOL_INVALID_QUOTA", "manual weekly quota must be > 0")
+	ErrCarpoolInvalidQuota     = infraerrors.BadRequest("CARPOOL_INVALID_QUOTA", "manual weekly quota must be > 0, reserve ratio in [0,1)")
 	ErrCarpoolInvalidShare     = infraerrors.BadRequest("CARPOOL_INVALID_SHARE", "share percent must be within [0,100] and all seats together cannot exceed 100")
 	ErrCarpoolResetNotAllowed  = infraerrors.BadRequest("CARPOOL_RESET_NOT_ALLOWED", "reset card can only be used after the carpool has used 80% of the 7-day window")
 	ErrCarpoolResetUnsupported = infraerrors.BadRequest("CARPOOL_RESET_UNSUPPORTED", "reset cards are only available for OpenAI OAuth accounts")
@@ -60,6 +60,7 @@ type Carpool struct {
 	WeeklyQuotaUSD float64
 	QuotaSource    string
 	Seats          int
+	ReserveRatio   float64 // 整车预留比例（0-1），不分给车位
 	ValidityDays   int
 	Notes          string
 	Status         string
@@ -77,12 +78,20 @@ type Carpool struct {
 	AllocatedPercent float64 // 已分配给各车位的百分比合计
 }
 
-// MemberWeeklyLimit 车位周额度 = 账号周额度 × 车位百分比；尚未预估时返回 nil（不限额）。
+// DistributableWeeklyUSD 可分给车位的周额度 = 账号周额度 × (1 - 整车预留)。
+func (c *Carpool) DistributableWeeklyUSD() float64 {
+	if c.WeeklyQuotaUSD <= 0 {
+		return 0
+	}
+	return roundCarpoolUSD(c.WeeklyQuotaUSD * (1 - c.ReserveRatio))
+}
+
+// MemberWeeklyLimit 车位周额度 = 可分配周额度 × 车位百分比；尚未预估时返回 nil（不限额）。
 func (c *Carpool) MemberWeeklyLimit(sharePercent float64) *float64 {
 	if c.WeeklyQuotaUSD <= 0 {
 		return nil
 	}
-	limit := CarpoolShareWeeklyUSD(c.WeeklyQuotaUSD, sharePercent)
+	limit := CarpoolShareWeeklyUSD(c.DistributableWeeklyUSD(), sharePercent)
 	return &limit
 }
 
@@ -194,6 +203,13 @@ func validateCarpoolSeats(seats int) error {
 	return nil
 }
 
+func validateCarpoolReserveRatio(ratio float64) error {
+	if ratio < 0 || ratio >= 1 || math.IsNaN(ratio) {
+		return ErrCarpoolInvalidQuota
+	}
+	return nil
+}
+
 func validateCarpoolShare(share float64) error {
 	if share < 0 || share > 100 || math.IsNaN(share) {
 		return ErrCarpoolInvalidShare
@@ -213,10 +229,10 @@ func normalizeCarpoolRole(role string) (string, error) {
 }
 
 // carpoolGroupWeeklyLimit 分组周限额只作兜底（各车位的实际额度写在订阅覆盖上）：
-// 有预估时取整车额度，尚未预估时取负数让分组暂不限额，而不是 0（0 表示禁止使用）。
+// 有预估时取可分配额度（已扣整车预留），尚未预估时取负数让分组暂不限额，而不是 0（0 表示禁止使用）。
 func carpoolGroupWeeklyLimit(c *Carpool) float64 {
-	if c.WeeklyQuotaUSD > 0 {
-		return c.WeeklyQuotaUSD
+	if distributable := c.DistributableWeeklyUSD(); distributable > 0 {
+		return distributable
 	}
 	return -1
 }

@@ -347,6 +347,7 @@ type CreateCarpoolInput struct {
 	AccountID      int64
 	WeeklyQuotaUSD *float64 // 非 nil 表示手动指定账号周额度，否则跟随自动预估
 	Seats          int
+	ReserveRatio   float64 // 整车预留比例（0-1）
 	ValidityDays   int
 	Notes          string
 	// ExclusiveAccount 为 true 时账号只保留拼车分组，避免车外流量吃掉额度
@@ -359,6 +360,7 @@ type CreateCarpoolInput struct {
 type UpdateCarpoolQuotaInput struct {
 	QuotaSource    *string  // auto 恢复跟随预估
 	WeeklyQuotaUSD *float64 // 非 nil 表示手动指定
+	ReserveRatio   *float64 // 整车预留比例（0-1）
 }
 
 // AdminUpdateCarpoolInput 仅系统管理员可改的字段 + 额度参数。
@@ -373,21 +375,22 @@ type AdminUpdateCarpoolInput struct {
 // ---------- 视图 ----------
 
 type CarpoolView struct {
-	ID                 int64     `json:"id"`
-	Name               string    `json:"name"`
-	AccountID          int64     `json:"account_id"`
-	GroupID            int64     `json:"group_id"`
-	WeeklyQuotaUSD     float64   `json:"weekly_quota_usd"`
-	QuotaSource        string    `json:"quota_source"`
-	Seats              int       `json:"seats"`
-	AllocatedPercent   float64   `json:"allocated_percent"`
-	UnallocatedPercent float64   `json:"unallocated_percent"`
-	ValidityDays       int       `json:"validity_days"`
-	Notes              string    `json:"notes"`
-	Status             string    `json:"status"`
-	MemberCount        int       `json:"member_count"`
-	CreatedAt          time.Time `json:"created_at"`
-	MyRole             string    `json:"my_role,omitempty"`
+	ID                  int64     `json:"id"`
+	Name                string    `json:"name"`
+	AccountID           int64     `json:"account_id"`
+	GroupID             int64     `json:"group_id"`
+	WeeklyQuotaUSD      float64   `json:"weekly_quota_usd"`
+	QuotaSource         string    `json:"quota_source"`
+	ReserveRatio        float64   `json:"reserve_ratio"`
+	DistributableWeekly float64   `json:"distributable_weekly_usd"`
+	Seats               int       `json:"seats"`
+	AllocatedPercent    float64   `json:"allocated_percent"`
+	ValidityDays        int       `json:"validity_days"`
+	Notes               string    `json:"notes"`
+	Status              string    `json:"status"`
+	MemberCount         int       `json:"member_count"`
+	CreatedAt           time.Time `json:"created_at"`
+	MyRole              string    `json:"my_role,omitempty"`
 }
 
 type CarpoolAccountView struct {
@@ -464,21 +467,22 @@ type CarpoolResetCardResult struct {
 
 func carpoolToView(c *Carpool, myRole string) CarpoolView {
 	return CarpoolView{
-		ID:                 c.ID,
-		Name:               c.Name,
-		AccountID:          c.AccountID,
-		GroupID:            c.GroupID,
-		WeeklyQuotaUSD:     c.WeeklyQuotaUSD,
-		QuotaSource:        c.QuotaSource,
-		Seats:              c.Seats,
-		AllocatedPercent:   roundCarpoolPercent(c.AllocatedPercent),
-		UnallocatedPercent: roundCarpoolPercent(math.Max(0, 100-c.AllocatedPercent)),
-		ValidityDays:       c.ValidityDays,
-		Notes:              c.Notes,
-		Status:             c.Status,
-		MemberCount:        c.MemberCount,
-		CreatedAt:          c.CreatedAt,
-		MyRole:             myRole,
+		ID:                  c.ID,
+		Name:                c.Name,
+		AccountID:           c.AccountID,
+		GroupID:             c.GroupID,
+		WeeklyQuotaUSD:      c.WeeklyQuotaUSD,
+		QuotaSource:         c.QuotaSource,
+		ReserveRatio:        c.ReserveRatio,
+		DistributableWeekly: c.DistributableWeeklyUSD(),
+		Seats:               c.Seats,
+		AllocatedPercent:    roundCarpoolPercent(c.AllocatedPercent),
+		ValidityDays:        c.ValidityDays,
+		Notes:               c.Notes,
+		Status:              c.Status,
+		MemberCount:         c.MemberCount,
+		CreatedAt:           c.CreatedAt,
+		MyRole:              myRole,
 	}
 }
 
@@ -513,6 +517,9 @@ func (s *CarpoolService) AdminCreate(ctx context.Context, input *CreateCarpoolIn
 	}
 	if len(input.Members) > input.Seats {
 		return nil, ErrCarpoolSeatsFull
+	}
+	if err := validateCarpoolReserveRatio(input.ReserveRatio); err != nil {
+		return nil, err
 	}
 	source := CarpoolQuotaSourceAuto
 	weekly := 0.0
@@ -560,6 +567,7 @@ func (s *CarpoolService) AdminCreate(ctx context.Context, input *CreateCarpoolIn
 		WeeklyQuotaUSD: weekly,
 		QuotaSource:    source,
 		Seats:          input.Seats,
+		ReserveRatio:   input.ReserveRatio,
 		ValidityDays:   validityDays,
 		Notes:          strings.TrimSpace(input.Notes),
 		Status:         domain.StatusActive,
@@ -1134,6 +1142,12 @@ func (s *CarpoolService) loadCarpoolForManager(ctx context.Context, id, userID i
 func applyCarpoolQuotaInput(c *Carpool, in *UpdateCarpoolQuotaInput) error {
 	if in == nil {
 		return nil
+	}
+	if in.ReserveRatio != nil {
+		if err := validateCarpoolReserveRatio(*in.ReserveRatio); err != nil {
+			return err
+		}
+		c.ReserveRatio = *in.ReserveRatio
 	}
 	switch {
 	case in.QuotaSource != nil && *in.QuotaSource == CarpoolQuotaSourceAuto:

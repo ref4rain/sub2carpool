@@ -19,7 +19,7 @@ func NewCarpoolRepository(db *sql.DB) service.CarpoolRepository {
 
 const carpoolSelectColumns = `
 	c.id, c.name, c.account_id, c.group_id,
-	c.weekly_quota_usd, c.quota_source, c.seats, c.validity_days, c.notes, c.status,
+	c.weekly_quota_usd, c.quota_source, c.seats, c.reserve_ratio, c.validity_days, c.notes, c.status,
 	c.created_by, c.created_at, c.updated_at,
 	c.estimated_weekly_usd, c.window_reset_at, c.baseline_at, c.baseline_used_percent,
 	(SELECT COUNT(*) FROM carpool_members m WHERE m.carpool_id = c.id) AS member_count,
@@ -34,7 +34,7 @@ func scanCarpool(row rowScanner) (*service.Carpool, error) {
 	)
 	if err := row.Scan(
 		&c.ID, &c.Name, &c.AccountID, &c.GroupID,
-		&c.WeeklyQuotaUSD, &c.QuotaSource, &c.Seats, &c.ValidityDays, &c.Notes, &c.Status,
+		&c.WeeklyQuotaUSD, &c.QuotaSource, &c.Seats, &c.ReserveRatio, &c.ValidityDays, &c.Notes, &c.Status,
 		&createdBy, &c.CreatedAt, &c.UpdatedAt,
 		&c.EstimatedWeeklyUSD, &windowResetAt, &baselineAt, &c.BaselineUsedPercent, &c.MemberCount, &c.AllocatedPercent,
 	); err != nil {
@@ -85,11 +85,11 @@ func (r *carpoolRepository) getOne(ctx context.Context, where string, arg any) (
 func (r *carpoolRepository) Create(ctx context.Context, c *service.Carpool) error {
 	return r.db.QueryRowContext(ctx, `
 		INSERT INTO carpools (name, account_id, group_id,
-			weekly_quota_usd, quota_source, seats, validity_days, notes, status, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			weekly_quota_usd, quota_source, seats, reserve_ratio, validity_days, notes, status, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id, created_at, updated_at`,
 		c.Name, c.AccountID, c.GroupID,
-		c.WeeklyQuotaUSD, c.QuotaSource, c.Seats, c.ValidityDays, c.Notes, c.Status, c.CreatedBy,
+		c.WeeklyQuotaUSD, c.QuotaSource, c.Seats, c.ReserveRatio, c.ValidityDays, c.Notes, c.Status, c.CreatedBy,
 	).Scan(&c.ID, &c.CreatedAt, &c.UpdatedAt)
 }
 
@@ -120,11 +120,11 @@ func (r *carpoolRepository) ListByUser(ctx context.Context, userID int64) ([]ser
 func (r *carpoolRepository) Update(ctx context.Context, c *service.Carpool) error {
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE carpools SET name = $2,
-			weekly_quota_usd = $3, quota_source = $4, seats = $5, validity_days = $6,
-			notes = $7, status = $8, updated_at = NOW()
+			weekly_quota_usd = $3, quota_source = $4, seats = $5, reserve_ratio = $6, validity_days = $7,
+			notes = $8, status = $9, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL`,
 		c.ID, c.Name,
-		c.WeeklyQuotaUSD, c.QuotaSource, c.Seats, c.ValidityDays, c.Notes, c.Status)
+		c.WeeklyQuotaUSD, c.QuotaSource, c.Seats, c.ReserveRatio, c.ValidityDays, c.Notes, c.Status)
 	if err != nil {
 		return err
 	}

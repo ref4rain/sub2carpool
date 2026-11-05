@@ -107,6 +107,10 @@
             </select>
           </label>
           <label class="text-sm text-gray-700 dark:text-gray-300">
+            {{ t('carpool.reserveRatio') }} (%)
+            <input v-model.number="createForm.reserve_percent" type="number" min="0" max="99" step="0.1" class="input mt-1" />
+          </label>
+          <label class="text-sm text-gray-700 dark:text-gray-300">
             {{ t('carpool.validityDays') }}
             <input v-model.number="createForm.validity_days" type="number" min="1" class="input mt-1" />
           </label>
@@ -182,6 +186,7 @@ const createForm = reactive({
   name: '',
   account_id: 0,
   seats: 3,
+  reserve_percent: 0,
   validity_days: 30,
   manual_weekly: '' as string | number,
   member_emails: '',
@@ -194,7 +199,9 @@ const createManualWeekly = computed(() => {
   return Number.isFinite(manual) && manual > 0 ? manual : null
 })
 // 初始成员按座位均分比例，预览一个座位能分到的额度
-const createPerSeat = computed(() => shareWeekly(createManualWeekly.value ?? 0, 100 / Math.max(createForm.seats, 1)))
+const createPerSeat = computed(() =>
+  shareWeekly((createManualWeekly.value ?? 0) * (1 - createForm.reserve_percent / 100), 100 / Math.max(createForm.seats, 1))
+)
 
 function showErr(err: unknown) {
   appStore.showError(extractApiErrorMessage(err, t('common.error')))
@@ -275,6 +282,7 @@ function submitCreate() {
       account_id: createForm.account_id,
       weekly_quota_usd: createManualWeekly.value ?? undefined,
       seats: createForm.seats,
+      reserve_ratio: createForm.reserve_percent / 100,
       validity_days: createForm.validity_days,
       exclusive_account: createForm.exclusive_account,
       members: emails.map((email) => ({ email, role: 'manager' }))

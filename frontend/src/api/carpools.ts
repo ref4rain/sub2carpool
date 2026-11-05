@@ -17,10 +17,13 @@ export interface Carpool {
   /** 当前生效的账号周额度；0 表示尚未预估 */
   weekly_quota_usd: number
   quota_source: CarpoolQuotaSource
+  /** 整车预留比例（0-1），先从账号周额度里扣掉，不分给车位 */
+  reserve_ratio: number
+  /** 可分给车位的周额度 = 账号周额度 × (1 - 预留) */
+  distributable_weekly_usd: number
   seats: number
-  /** 已分配给各车位的百分比合计 */
+  /** 已分配给各车位的百分比合计（按 100% 分配） */
   allocated_percent: number
-  unallocated_percent: number
   validity_days: number
   notes: string
   status: string
@@ -101,6 +104,8 @@ export interface CarpoolQuotaRequest {
   quota_source?: 'auto'
   /** 手动指定账号周额度 */
   weekly_quota_usd?: number
+  /** 整车预留比例（0-1） */
+  reserve_ratio?: number
 }
 
 export interface CarpoolResetCredit {

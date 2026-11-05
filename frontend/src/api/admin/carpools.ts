@@ -27,6 +27,8 @@ export interface CreateCarpoolRequest {
   /** 留空则跟随自动预估 */
   weekly_quota_usd?: number
   seats: number
+  /** 整车预留比例（0-1） */
+  reserve_ratio: number
   validity_days: number
   notes?: string
   exclusive_account: boolean

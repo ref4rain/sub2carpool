@@ -24,12 +24,12 @@
             <div class="font-medium text-gray-900 dark:text-white">{{ quotaText(carpool.weekly_quota_usd) }}</div>
           </div>
           <div>
-            <div class="text-xs text-gray-500 dark:text-dark-400">{{ t('carpool.allocated') }}</div>
-            <div class="font-medium text-gray-900 dark:text-white">{{ pct(carpool.allocated_percent) }}</div>
+            <div class="text-xs text-gray-500 dark:text-dark-400">{{ t('carpool.reserveRatio') }}</div>
+            <div class="font-medium text-gray-900 dark:text-white">{{ pct(carpool.reserve_ratio * 100) }}</div>
           </div>
           <div>
-            <div class="text-xs text-gray-500 dark:text-dark-400">{{ t('carpool.unallocated') }}</div>
-            <div class="font-semibold text-primary-600 dark:text-primary-400">{{ pct(carpool.unallocated_percent) }}</div>
+            <div class="text-xs text-gray-500 dark:text-dark-400">{{ t('carpool.distributableWeekly') }}</div>
+            <div class="font-semibold text-primary-600 dark:text-primary-400">{{ quotaText(carpool.distributable_weekly_usd) }}</div>
           </div>
         </div>
       </div>
@@ -128,7 +128,12 @@
               <div class="font-medium text-gray-900 dark:text-white">{{ t('carpool.estimate.applied') }}</div>
               <div class="text-xs text-gray-400">{{ t(`carpool.quotaSourceHints.${carpool.quota_source}`) }}</div>
             </dt>
-            <dd class="text-right font-semibold text-gray-900 dark:text-white">{{ quotaText(estimate.applied_weekly_usd) }}</dd>
+            <dd class="text-right">
+              <div class="font-semibold text-gray-900 dark:text-white">{{ quotaText(estimate.applied_weekly_usd) }}</div>
+              <div v-if="carpool.reserve_ratio > 0" class="text-xs text-primary-600 dark:text-primary-400">
+                {{ t('carpool.estimate.afterReserve', { reserve: pct(carpool.reserve_ratio * 100), amount: quotaText(carpool.distributable_weekly_usd) }) }}
+              </div>
+            </dd>
           </div>
         </dl>
 
@@ -142,6 +147,11 @@
         </div>
 
         <form v-if="editing" class="mt-4 space-y-3 rounded-lg bg-gray-50 p-3 dark:bg-dark-700/50" @submit.prevent="saveQuota">
+          <label class="block text-xs text-gray-600 dark:text-gray-300">
+            {{ t('carpool.reserveRatio') }} (%)
+            <input v-model.number="form.reserve_percent" type="number" min="0" max="99" step="0.1" class="input mt-1" />
+            <span class="mt-1 block text-[11px] text-gray-400">{{ t('carpool.reserveRatioHint') }}</span>
+          </label>
           <label class="block text-xs text-gray-600 dark:text-gray-300">
             {{ t('carpool.estimate.manualWeekly') }}
             <input v-model="form.manual_weekly" type="number" min="0" step="0.01" class="input mt-1" />
@@ -314,7 +324,7 @@ const accountHealthy = computed(() => !!account.value && account.value.schedulab
 
 const busy = ref(false)
 const editing = ref(false)
-const form = reactive({ manual_weekly: '' as string | number })
+const form = reactive({ reserve_percent: 0, manual_weekly: '' as string | number })
 
 // 车位比例草稿，详情刷新后重置
 const shareDrafts = reactive<Record<number, number>>({})
@@ -368,6 +378,7 @@ function resetHint(v: string | null): string {
 function toggleEdit() {
   editing.value = !editing.value
   if (editing.value) {
+    form.reserve_percent = Math.round(carpool.value.reserve_ratio * 1000) / 10
     form.manual_weekly = carpool.value.quota_source === 'manual' ? carpool.value.weekly_quota_usd : ''
   }
 }
@@ -394,7 +405,13 @@ function followEstimate() {
 }
 
 function saveQuota() {
+  const reserve = Number(form.reserve_percent)
+  if (!Number.isFinite(reserve) || reserve < 0 || reserve >= 100) {
+    appStore.showError(t('carpool.reserveRatioInvalid'))
+    return
+  }
   const req: CarpoolQuotaRequest = manualWeekly.value != null ? { weekly_quota_usd: manualWeekly.value } : { quota_source: 'auto' }
+  req.reserve_ratio = reserve / 100
   return run(async () => {
     await props.actions.updateQuota(carpool.value.id, req)
     editing.value = false

@@ -395,6 +395,35 @@ func TestSyncLimits_WritesShareBasedSubscriptionLimits(t *testing.T) {
 	require.Empty(t, *invalidated, "没有变化不重复失效缓存")
 }
 
+func TestReserveRatio_ComesOffTheTopBeforeShares(t *testing.T) {
+	svc, repo, admin, _ := newCarpoolTestService()
+	repo.carpools[10].WeeklyQuotaUSD = 1000
+	repo.carpools[10].QuotaSource = CarpoolQuotaSourceManual
+	repo.carpools[10].ReserveRatio = 0.05
+	repo.members[10][0].SharePercent = 50
+	repo.members[10][1].SharePercent = 50
+
+	syncCarpool(t, svc, repo, 10, time.Now())
+	require.InDelta(t, 475, *repo.subs[501].limit, 1e-9, "1000 × (1 - 5%) × 50%")
+	require.InDelta(t, 475, *repo.subs[502].limit, 1e-9)
+	require.InDelta(t, 950, *admin.groupWeekly[1000], 1e-9, "分组兜底也扣掉预留")
+
+	// manager 在调整额度里改预留
+	reserve := 0.1
+	view, err := svc.ManagerUpdateQuota(context.Background(), 10, 1, &UpdateCarpoolQuotaInput{ReserveRatio: &reserve})
+	require.NoError(t, err)
+	require.Equal(t, 0.1, view.ReserveRatio)
+	require.InDelta(t, 900, view.DistributableWeekly, 1e-9)
+	require.InDelta(t, 450, *repo.subs[501].limit, 1e-9)
+	require.Equal(t, CarpoolQuotaSourceManual, repo.carpools[10].QuotaSource, "只改预留不影响额度来源")
+
+	bad := 1.0
+	_, err = svc.ManagerUpdateQuota(context.Background(), 10, 1, &UpdateCarpoolQuotaInput{ReserveRatio: &bad})
+	require.ErrorIs(t, err, ErrCarpoolInvalidQuota)
+	_, err = svc.ManagerUpdateQuota(context.Background(), 10, 2, &UpdateCarpoolQuotaInput{ReserveRatio: &reserve})
+	require.ErrorIs(t, err, ErrCarpoolForbidden, "只读成员不能改预留")
+}
+
 func TestSetMemberShare(t *testing.T) {
 	svc, repo, _, _ := newCarpoolTestService()
 	repo.carpools[10].WeeklyQuotaUSD = 200
@@ -409,7 +438,6 @@ func TestSetMemberShare(t *testing.T) {
 	view, err := svc.SetMemberShare(ctx, 10, 1, 2, 60)
 	require.NoError(t, err)
 	require.Equal(t, 100.0, view.AllocatedPercent)
-	require.Zero(t, view.UnallocatedPercent)
 	require.InDelta(t, 120, *repo.subs[502].limit, 1e-9)
 
 	_, err = svc.SetMemberShare(ctx, 10, 0, 2, 101)
@@ -617,7 +645,6 @@ func TestCarpoolDetail_MembersSeeEachOther(t *testing.T) {
 	require.Equal(t, 40.0, detail.Members[0].SharePercent)
 	require.Equal(t, resetAt.Unix(), detail.Members[0].WeeklyResetsAt.Unix(), "成员重置时间跟随账号窗口")
 	require.Equal(t, 70.0, detail.Carpool.AllocatedPercent)
-	require.Equal(t, 30.0, detail.Carpool.UnallocatedPercent)
 
 	require.InDelta(t, 20, detail.Estimate.SampleUsedPercent, 1e-9)
 	require.InDelta(t, 30, detail.Estimate.SampleCostUSD, 1e-9)

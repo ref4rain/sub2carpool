@@ -22,12 +22,14 @@ func NewCarpoolHandler(carpoolService *service.CarpoolService) *CarpoolHandler {
 type carpoolQuotaRequest struct {
 	QuotaSource    *string  `json:"quota_source" binding:"omitempty,oneof=auto"`
 	WeeklyQuotaUSD *float64 `json:"weekly_quota_usd"`
+	ReserveRatio   *float64 `json:"reserve_ratio"`
 }
 
 func (r *carpoolQuotaRequest) toInput() service.UpdateCarpoolQuotaInput {
 	return service.UpdateCarpoolQuotaInput{
 		QuotaSource:    r.QuotaSource,
 		WeeklyQuotaUSD: r.WeeklyQuotaUSD,
+		ReserveRatio:   r.ReserveRatio,
 	}
 }
 
@@ -56,6 +58,7 @@ type createCarpoolRequest struct {
 	AccountID        int64                  `json:"account_id" binding:"required"`
 	WeeklyQuotaUSD   *float64               `json:"weekly_quota_usd"`
 	Seats            int                    `json:"seats" binding:"required"`
+	ReserveRatio     float64                `json:"reserve_ratio"`
 	ValidityDays     int                    `json:"validity_days"`
 	Notes            string                 `json:"notes"`
 	ExclusiveAccount *bool                  `json:"exclusive_account"`
@@ -222,6 +225,7 @@ func (h *CarpoolHandler) AdminCreate(c *gin.Context) {
 		AccountID:        req.AccountID,
 		WeeklyQuotaUSD:   req.WeeklyQuotaUSD,
 		Seats:            req.Seats,
+		ReserveRatio:     req.ReserveRatio,
 		ValidityDays:     req.ValidityDays,
 		Notes:            req.Notes,
 		ExclusiveAccount: exclusive,
