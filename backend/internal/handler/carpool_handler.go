@@ -22,14 +22,12 @@ func NewCarpoolHandler(carpoolService *service.CarpoolService) *CarpoolHandler {
 type carpoolQuotaRequest struct {
 	QuotaSource    *string  `json:"quota_source" binding:"omitempty,oneof=auto"`
 	WeeklyQuotaUSD *float64 `json:"weekly_quota_usd"`
-	ReserveRatio   *float64 `json:"reserve_ratio"`
 }
 
 func (r *carpoolQuotaRequest) toInput() service.UpdateCarpoolQuotaInput {
 	return service.UpdateCarpoolQuotaInput{
 		QuotaSource:    r.QuotaSource,
 		WeeklyQuotaUSD: r.WeeklyQuotaUSD,
-		ReserveRatio:   r.ReserveRatio,
 	}
 }
 
@@ -39,9 +37,18 @@ type carpoolAccountActionRequest struct {
 }
 
 type carpoolMemberRequest struct {
-	UserID int64  `json:"user_id"`
-	Email  string `json:"email"`
-	Role   string `json:"role"`
+	UserID       int64    `json:"user_id"`
+	Email        string   `json:"email"`
+	Role         string   `json:"role"`
+	SharePercent *float64 `json:"share_percent"`
+}
+
+func (r carpoolMemberRequest) toInput() service.CarpoolMemberInput {
+	return service.CarpoolMemberInput{UserID: r.UserID, Email: r.Email, Role: r.Role, SharePercent: r.SharePercent}
+}
+
+type carpoolShareRequest struct {
+	SharePercent *float64 `json:"share_percent" binding:"required"`
 }
 
 type createCarpoolRequest struct {
@@ -49,7 +56,6 @@ type createCarpoolRequest struct {
 	AccountID        int64                  `json:"account_id" binding:"required"`
 	WeeklyQuotaUSD   *float64               `json:"weekly_quota_usd"`
 	Seats            int                    `json:"seats" binding:"required"`
-	ReserveRatio     float64                `json:"reserve_ratio"`
 	ValidityDays     int                    `json:"validity_days"`
 	Notes            string                 `json:"notes"`
 	ExclusiveAccount *bool                  `json:"exclusive_account"`
@@ -205,7 +211,7 @@ func (h *CarpoolHandler) AdminCreate(c *gin.Context) {
 	}
 	members := make([]service.CarpoolMemberInput, 0, len(req.Members))
 	for _, m := range req.Members {
-		members = append(members, service.CarpoolMemberInput{UserID: m.UserID, Email: m.Email, Role: m.Role})
+		members = append(members, m.toInput())
 	}
 	exclusive := true
 	if req.ExclusiveAccount != nil {
@@ -216,7 +222,6 @@ func (h *CarpoolHandler) AdminCreate(c *gin.Context) {
 		AccountID:        req.AccountID,
 		WeeklyQuotaUSD:   req.WeeklyQuotaUSD,
 		Seats:            req.Seats,
-		ReserveRatio:     req.ReserveRatio,
 		ValidityDays:     req.ValidityDays,
 		Notes:            req.Notes,
 		ExclusiveAccount: exclusive,
@@ -283,9 +288,7 @@ func (h *CarpoolHandler) AdminAddMember(c *gin.Context) {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
-	if err := h.carpoolService.AdminAddMember(c.Request.Context(), id, service.CarpoolMemberInput{
-		UserID: req.UserID, Email: req.Email, Role: req.Role,
-	}, actorID); err != nil {
+	if err := h.carpoolService.AdminAddMember(c.Request.Context(), id, req.toInput(), actorID); err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
@@ -363,3 +366,83 @@ func (h *CarpoolHandler) AdminRenew(c *gin.Context) {
 func (h *CarpoolHandler) AdminAccountAction(c *gin.Context) {
 	h.doAccountAction(c, 0)
 }
+
+// ---------- 车位比例与重置卡（成员与管理员共用，actorID=0 表示系统管理员） ----------
+
+func (h *CarpoolHandler) doSetMemberShare(c *gin.Context, actorID int64) {
+	id, ok := carpoolIDParam(c)
+	if !ok {
+		return
+	}
+	userID, ok := carpoolMemberUserParam(c)
+	if !ok {
+		return
+	}
+	var req carpoolShareRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	view, err := h.carpoolService.SetMemberShare(c.Request.Context(), id, actorID, userID, *req.SharePercent)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, view)
+}
+
+func (h *CarpoolHandler) doGetResetCards(c *gin.Context, actorID int64) {
+	id, ok := carpoolIDParam(c)
+	if !ok {
+		return
+	}
+	cards, err := h.carpoolService.GetResetCards(c.Request.Context(), id, actorID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, cards)
+}
+
+func (h *CarpoolHandler) doUseResetCard(c *gin.Context, actorID int64) {
+	id, ok := carpoolIDParam(c)
+	if !ok {
+		return
+	}
+	result, err := h.carpoolService.UseResetCard(c.Request.Context(), id, actorID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+// SetMemberShare PUT /api/v1/carpools/:id/members/:user_id/share （仅 manager）
+func (h *CarpoolHandler) SetMemberShare(c *gin.Context) {
+	if userID, ok := carpoolSubject(c); ok {
+		h.doSetMemberShare(c, userID)
+	}
+}
+
+// GetResetCards GET /api/v1/carpools/:id/reset-cards
+func (h *CarpoolHandler) GetResetCards(c *gin.Context) {
+	if userID, ok := carpoolSubject(c); ok {
+		h.doGetResetCards(c, userID)
+	}
+}
+
+// UseResetCard POST /api/v1/carpools/:id/reset-cards/use （仅 manager，整车用量 ≥ 80%）
+func (h *CarpoolHandler) UseResetCard(c *gin.Context) {
+	if userID, ok := carpoolSubject(c); ok {
+		h.doUseResetCard(c, userID)
+	}
+}
+
+// AdminSetMemberShare PUT /api/v1/admin/carpools/:id/members/:user_id/share
+func (h *CarpoolHandler) AdminSetMemberShare(c *gin.Context) { h.doSetMemberShare(c, 0) }
+
+// AdminGetResetCards GET /api/v1/admin/carpools/:id/reset-cards
+func (h *CarpoolHandler) AdminGetResetCards(c *gin.Context) { h.doGetResetCards(c, 0) }
+
+// AdminUseResetCard POST /api/v1/admin/carpools/:id/reset-cards/use
+func (h *CarpoolHandler) AdminUseResetCard(c *gin.Context) { h.doUseResetCard(c, 0) }

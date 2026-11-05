@@ -46,7 +46,9 @@ type subscriptionCacheData struct {
 	DailyUsage   float64
 	WeeklyUsage  float64
 	MonthlyUsage float64
-	Version      int64
+	// WeeklyLimit 订阅级周限额覆盖，nil 表示沿用分组
+	WeeklyLimit *float64
+	Version     int64
 }
 
 // 缓存写入任务类型
@@ -448,6 +450,7 @@ func (s *BillingCacheService) convertFromPortsData(data *SubscriptionCacheData) 
 		DailyUsage:   data.DailyUsage,
 		WeeklyUsage:  data.WeeklyUsage,
 		MonthlyUsage: data.MonthlyUsage,
+		WeeklyLimit:  data.WeeklyLimit,
 		Version:      data.Version,
 	}
 }
@@ -459,6 +462,7 @@ func (s *BillingCacheService) convertToPortsData(data *subscriptionCacheData) *S
 		DailyUsage:   data.DailyUsage,
 		WeeklyUsage:  data.WeeklyUsage,
 		MonthlyUsage: data.MonthlyUsage,
+		WeeklyLimit:  data.WeeklyLimit,
 		Version:      data.Version,
 	}
 }
@@ -476,6 +480,7 @@ func (s *BillingCacheService) getSubscriptionFromDB(ctx context.Context, userID,
 		DailyUsage:   sub.DailyUsageUSD,
 		WeeklyUsage:  sub.WeeklyUsageUSD,
 		MonthlyUsage: sub.MonthlyUsageUSD,
+		WeeklyLimit:  sub.WeeklyLimitUSD,
 		Version:      sub.UpdatedAt.Unix(),
 	}, nil
 }
@@ -819,7 +824,9 @@ func (s *BillingCacheService) ReserveFixedCharge(ctx context.Context, user *User
 		return nil, err
 	}
 	var subscriptionPending, apiKeyPending float64
-	if subscriptionBill && (group.HasDailyLimit() || group.HasWeeklyLimit() || group.HasMonthlyLimit()) {
+	// 订阅级周限额覆盖只存在于订阅行，分组没有任何限额时也要按订阅校验
+	if subscriptionBill && (group.HasDailyLimit() || group.HasWeeklyLimit() || group.HasMonthlyLimit() ||
+		(subscription != nil && subscription.WeeklyLimitUSD != nil)) {
 		res, subscriptionPending = s.reserveInflightScope(ctx, res, user.ID, inflightSubscriptionScope(subscription.ID), amount)
 	}
 	if apiKey != nil && (apiKey.Quota > 0 || apiKey.HasRateLimits()) {
@@ -851,7 +858,7 @@ func (s *BillingCacheService) checkFixedChargeSubscription(ctx context.Context, 
 	if group.HasDailyLimit() && subData.DailyUsage+pending > *group.DailyLimitUSD {
 		return ErrDailyLimitExceeded
 	}
-	if group.HasWeeklyLimit() && subData.WeeklyUsage+pending > *group.WeeklyLimitUSD {
+	if limit := EffectiveWeeklyLimit(subData.WeeklyLimit, group); limit != nil && subData.WeeklyUsage+pending > *limit {
 		return ErrWeeklyLimitExceeded
 	}
 	if group.HasMonthlyLimit() && subData.MonthlyUsage+pending > *group.MonthlyLimitUSD {
@@ -1072,7 +1079,7 @@ func (s *BillingCacheService) checkSubscriptionEligibility(ctx context.Context, 
 		return ErrDailyLimitExceeded
 	}
 
-	if group.HasWeeklyLimit() && subData.WeeklyUsage >= *group.WeeklyLimitUSD {
+	if limit := EffectiveWeeklyLimit(subData.WeeklyLimit, group); limit != nil && subData.WeeklyUsage >= *limit {
 		return ErrWeeklyLimitExceeded
 	}
 

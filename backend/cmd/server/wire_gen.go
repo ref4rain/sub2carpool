@@ -330,7 +330,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	batchImageCleanupService := service.ProvideBatchImageCleanupService(batchImageRepository, accountRepository, configConfig)
 	batchImageHandler := handler.ProvideBatchImageHandler(batchImagePublicService, batchImageDownloadService, batchImageCleanupService, openAIGatewayHandler)
 	carpoolRepository := repository.NewCarpoolRepository(db)
-	carpoolService := service.ProvideCarpoolService(carpoolRepository, adminService, subscriptionService, accountUsageService, rateLimitService, userRepository)
+	carpoolService := service.ProvideCarpoolService(carpoolRepository, adminService, subscriptionService, accountUsageService, rateLimitService, openAIQuotaService, userRepository)
 	carpoolHandler := handler.NewCarpoolHandler(carpoolService)
 	idempotencyCleanupService := service.ProvideIdempotencyCleanupService(idempotencyRepository, configConfig)
 	openAIQuotaAutoResetService := service.ProvideOpenAIQuotaAutoResetService(accountRepository, openAIQuotaService, rateLimitService, idempotencyCoordinator, auditLogService, settingService, leaderLockCache)

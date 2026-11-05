@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -13,20 +14,31 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 )
 
-const carpoolEstimateInterval = 5 * time.Minute
+const (
+	carpoolSyncInterval = time.Minute
+	// 订阅变更回调可能早于外层事务提交，稍等再同步；漏掉的由定时同步兜底
+	carpoolChangeHookDelay = 2 * time.Second
+)
 
-// CarpoolService 拼车管理：系统管理员建车/调座位/管成员；车内 manager 可调整账号与额度；
-// 所有成员可查看同车成员用量，不同拼车之间互不可见。周额度由后台任务跟随账号 7 天窗口自动预估。
+// CarpoolService 拼车管理：系统管理员建车/调座位/管成员；车内 manager 可调整账号、额度与车位比例；
+// 所有成员可查看同车成员用量，不同拼车之间互不可见。
+//
+// 车位与拼车分组订阅双向绑定：在订阅页给拼车分组分配订阅即占一个车位，加车位即分配订阅，
+// 撤销订阅即释放车位。每个车位按百分比分得账号周额度，写到该订阅的周限额覆盖上；
+// 订阅周窗口对齐账号 7 天窗口，账号窗口重置（含使用重置卡）时成员周用量一并清零。
 type CarpoolService struct {
 	repo                CarpoolRepository
 	adminService        AdminService
 	subscriptionService *SubscriptionService
 	accountUsageService *AccountUsageService
 	rateLimitService    *RateLimitService
+	quotaService        *OpenAIQuotaService
 	userRepo            UserRepository
-	// resetMemberWeekly 上游进入新窗口时清零成员周用量，并把成员周窗口对齐到当前时刻
-	resetMemberWeekly func(ctx context.Context, subscriptionID int64) error
+	// invalidateSub 直接改写订阅行后失效订阅缓存（测试可替换）
+	invalidateSub func(userID, groupID int64)
 
+	// mu 串行化同一实例内的车位同步，避免订阅回调与管理操作并发插入同一车位
+	mu       sync.Mutex
 	stopCh   chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
@@ -38,35 +50,42 @@ func NewCarpoolService(
 	subscriptionService *SubscriptionService,
 	accountUsageService *AccountUsageService,
 	rateLimitService *RateLimitService,
+	quotaService *OpenAIQuotaService,
 	userRepo UserRepository,
 ) *CarpoolService {
-	return &CarpoolService{
+	s := &CarpoolService{
 		repo:                repo,
 		adminService:        adminService,
 		subscriptionService: subscriptionService,
 		accountUsageService: accountUsageService,
 		rateLimitService:    rateLimitService,
+		quotaService:        quotaService,
 		userRepo:            userRepo,
-		resetMemberWeekly: func(ctx context.Context, subscriptionID int64) error {
-			_, err := subscriptionService.AdminResetQuota(ctx, subscriptionID, false, true, false)
-			return err
-		},
-		stopCh: make(chan struct{}),
+		stopCh:              make(chan struct{}),
 	}
+	s.invalidateSub = func(userID, groupID int64) {
+		if subscriptionService == nil {
+			return
+		}
+		if err := subscriptionService.InvalidateSubscriptionCaches(userID, groupID); err != nil {
+			logger.LegacyPrintf("service.carpool", "[Carpool] invalidate subscription cache failed: user=%d group=%d err=%v", userID, groupID, err)
+		}
+	}
+	return s
 }
 
-// Start 启动周额度预估任务。
+// Start 启动定时同步（车位、周额度预估、订阅限额与窗口）。
 func (s *CarpoolService) Start() {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		ticker := time.NewTicker(carpoolEstimateInterval)
+		ticker := time.NewTicker(carpoolSyncInterval)
 		defer ticker.Stop()
-		s.refreshAllEstimates()
+		s.syncAll()
 		for {
 			select {
 			case <-ticker.C:
-				s.refreshAllEstimates()
+				s.syncAll()
 			case <-s.stopCh:
 				return
 			}
@@ -74,111 +93,229 @@ func (s *CarpoolService) Start() {
 	}()
 }
 
-// Stop 停止周额度预估任务。
+// Stop 停止定时同步。
 func (s *CarpoolService) Stop() {
 	s.stopOnce.Do(func() { close(s.stopCh) })
 	s.wg.Wait()
 }
 
-func (s *CarpoolService) refreshAllEstimates() {
-	ctx, cancel := context.WithTimeout(context.Background(), carpoolEstimateInterval)
+// OnSubscriptionChange 订阅变更回调：变更落在拼车分组上时同步该车车位。
+func (s *CarpoolService) OnSubscriptionChange(groupID int64) {
+	select {
+	case <-time.After(carpoolChangeHookDelay):
+	case <-s.stopCh:
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), carpoolSyncInterval)
+	defer cancel()
+	carpools, err := s.repo.List(ctx)
+	if err != nil {
+		return
+	}
+	for i := range carpools {
+		if carpools[i].GroupID == groupID {
+			if err := s.sync(ctx, &carpools[i]); err != nil {
+				logger.LegacyPrintf("service.carpool", "[Carpool] sync after subscription change failed: carpool=%d err=%v", carpools[i].ID, err)
+			}
+		}
+	}
+}
+
+func (s *CarpoolService) syncAll() {
+	ctx, cancel := context.WithTimeout(context.Background(), carpoolSyncInterval)
 	defer cancel()
 	carpools, err := s.repo.List(ctx)
 	if err != nil {
 		logger.LegacyPrintf("service.carpool", "[Carpool] list carpools failed: %v", err)
 		return
 	}
-	now := time.Now()
 	for i := range carpools {
-		if err := s.refreshEstimate(ctx, &carpools[i], now); err != nil {
-			logger.LegacyPrintf("service.carpool", "[Carpool] refresh estimate failed: carpool=%d err=%v", carpools[i].ID, err)
+		if err := s.sync(ctx, &carpools[i]); err != nil {
+			logger.LegacyPrintf("service.carpool", "[Carpool] sync failed: carpool=%d err=%v", carpools[i].ID, err)
 		}
 	}
 }
 
-// refreshEstimate 用账号 7 天窗口快照刷新预估，并把每人额度同步到分组周限额。
-//
-// 样本只算基线之后的增量：首次跟踪时基线取当前已用百分比，排除建车前（可能未经本站）的用量；
-// 跟踪中进入新窗口时基线取窗口起点。新窗口样本不足前沿用上一次预估。
-func (s *CarpoolService) refreshEstimate(ctx context.Context, c *Carpool, now time.Time) error {
+// sync 加锁执行一次完整同步：车位 ↔ 订阅、周额度预估、分组兜底限额、各订阅限额与周窗口。
+func (s *CarpoolService) sync(ctx context.Context, c *Carpool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.syncLocked(ctx, c, time.Now())
+}
+
+func (s *CarpoolService) syncLocked(ctx context.Context, c *Carpool, now time.Time) error {
+	if err := s.reconcileMembers(ctx, c); err != nil {
+		return err
+	}
 	account, err := s.adminService.GetAccount(ctx, c.AccountID)
 	if err != nil {
 		return err
 	}
-	if window := carpoolWindowFromAccount(account, now); window != nil {
-		state := CarpoolEstimateState{
-			EstimatedWeeklyUSD:  c.EstimatedWeeklyUSD,
-			WindowResetAt:       c.WindowResetAt,
-			BaselineAt:          c.BaselineAt,
-			BaselineUsedPercent: c.BaselineUsedPercent,
-		}
-		newWindow := window.isNewWindow(c)
-		tracked := c.WindowResetAt != nil
-		if newWindow {
-			resetAt := window.ResetAt
-			state.WindowResetAt = &resetAt
-			if tracked {
-				start := resetAt.Add(-carpoolUpstreamWindow)
-				state.BaselineAt = &start
-				state.BaselineUsedPercent = 0
-			} else {
-				baseline := now
-				state.BaselineAt = &baseline
-				state.BaselineUsedPercent = window.UsedPercent
-			}
-		}
-		if state.BaselineAt != nil && window.UsedPercent-state.BaselineUsedPercent >= CarpoolMinEstimatePercent {
-			cost, err := s.repo.GetAccountActualCostSince(ctx, c.AccountID, *state.BaselineAt)
-			if err != nil {
-				return err
-			}
-			if estimated, ok := CarpoolEstimateWeekly(cost, window.UsedPercent-state.BaselineUsedPercent); ok {
-				state.EstimatedWeeklyUSD = estimated
-			}
-		}
-		state.ApplyToQuota = c.QuotaSource == CarpoolQuotaSourceAuto && carpoolQuotaChanged(c.WeeklyQuotaUSD, state.EstimatedWeeklyUSD)
-		if newWindow || state.ApplyToQuota || state.EstimatedWeeklyUSD != c.EstimatedWeeklyUSD {
-			saved, err := s.repo.SaveEstimateState(ctx, c.ID, &state, c.WindowResetAt)
-			if err != nil {
-				return err
-			}
-			if !saved {
-				return nil // 其他实例已处理该窗口
-			}
-			if newWindow && tracked {
-				s.alignMemberWeeklyWindows(ctx, c.ID)
-			}
-			c.EstimatedWeeklyUSD = state.EstimatedWeeklyUSD
-			c.WindowResetAt = state.WindowResetAt
-			c.BaselineAt = state.BaselineAt
-			c.BaselineUsedPercent = state.BaselineUsedPercent
-			if state.ApplyToQuota {
-				c.WeeklyQuotaUSD = state.EstimatedWeeklyUSD
-			}
+	window := carpoolWindowFromAccount(account, now)
+	if window != nil {
+		if err := s.refreshEstimate(ctx, c, window, now); err != nil {
+			return err
 		}
 	}
-	return s.syncGroupLimit(ctx, c)
+	return s.syncLimits(ctx, c, window)
 }
 
-// alignMemberWeeklyWindows 上游窗口重置后清零成员周用量，让成员周窗口与账号同步刷新。
-func (s *CarpoolService) alignMemberWeeklyWindows(ctx context.Context, carpoolID int64) {
-	members, err := s.repo.ListMembers(ctx, carpoolID)
+// reconcileMembers 车位与拼车分组订阅双向对齐：有订阅没车位的补车位，车位订阅被撤销的释放车位。
+func (s *CarpoolService) reconcileMembers(ctx context.Context, c *Carpool) error {
+	live, err := s.repo.ListLiveGroupSubscriptions(ctx, c.GroupID)
 	if err != nil {
-		logger.LegacyPrintf("service.carpool", "[Carpool] list members failed: carpool=%d err=%v", carpoolID, err)
-		return
+		return err
+	}
+	members, err := s.repo.ListMembers(ctx, c.ID)
+	if err != nil {
+		return err
+	}
+	c.MemberCount = 0
+	c.AllocatedPercent = 0
+	seated := make(map[int64]struct{}, len(members))
+	for _, m := range members {
+		subID, ok := live[m.UserID]
+		if !ok {
+			if err := s.repo.RemoveMember(ctx, c.ID, m.UserID); err != nil && !errors.Is(err, ErrCarpoolMemberNotFound) {
+				return err
+			}
+			continue
+		}
+		if m.SubscriptionID == nil || *m.SubscriptionID != subID {
+			if err := s.repo.SetMemberSubscription(ctx, c.ID, m.UserID, subID); err != nil {
+				return err
+			}
+		}
+		seated[m.UserID] = struct{}{}
+		c.MemberCount++
+		c.AllocatedPercent += m.SharePercent
+	}
+
+	newcomers := make([]int64, 0)
+	for userID := range live {
+		if _, ok := seated[userID]; !ok {
+			newcomers = append(newcomers, userID)
+		}
+	}
+	sort.Slice(newcomers, func(i, j int) bool { return live[newcomers[i]] < live[newcomers[j]] })
+	seatsBefore := c.Seats
+	for _, userID := range newcomers {
+		if c.MemberCount >= c.Seats {
+			// 订阅页直接分配的订阅超出座位数时自动加座；新车位分到剩余比例，没有剩余则为 0，等管理员分配
+			c.Seats = c.MemberCount + 1
+		}
+		subID := live[userID]
+		share := c.DefaultSharePercent()
+		err := s.repo.AddMember(ctx, &CarpoolMember{
+			CarpoolID:      c.ID,
+			UserID:         userID,
+			SubscriptionID: &subID,
+			Role:           CarpoolRoleManager,
+			SharePercent:   share,
+		})
+		if err != nil && !errors.Is(err, ErrCarpoolMemberExists) {
+			return err
+		}
+		c.MemberCount++
+		c.AllocatedPercent += share
+	}
+	if c.Seats != seatsBefore {
+		if err := s.repo.Update(ctx, c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// refreshEstimate 用账号 7 天窗口快照刷新周额度预估。
+//
+// 样本只算基线之后的增量：首次跟踪时基线取当前已用百分比，排除建车前（可能未经本站）的用量；
+// 跟踪中进入新窗口（自然重置或使用重置卡）时基线取窗口起点。新窗口样本不足前沿用上一次预估。
+func (s *CarpoolService) refreshEstimate(ctx context.Context, c *Carpool, window *carpoolWindowSample, now time.Time) error {
+	state := CarpoolEstimateState{
+		EstimatedWeeklyUSD:  c.EstimatedWeeklyUSD,
+		WindowResetAt:       c.WindowResetAt,
+		BaselineAt:          c.BaselineAt,
+		BaselineUsedPercent: c.BaselineUsedPercent,
+	}
+	newWindow := window.isNewWindow(c)
+	if newWindow {
+		resetAt := window.ResetAt
+		state.WindowResetAt = &resetAt
+		if c.WindowResetAt != nil {
+			start := resetAt.Add(-carpoolUpstreamWindow)
+			state.BaselineAt = &start
+			state.BaselineUsedPercent = 0
+		} else {
+			baseline := now
+			state.BaselineAt = &baseline
+			state.BaselineUsedPercent = window.UsedPercent
+		}
+	}
+	if state.BaselineAt != nil && window.UsedPercent-state.BaselineUsedPercent >= CarpoolMinEstimatePercent {
+		cost, err := s.repo.GetAccountActualCostSince(ctx, c.AccountID, *state.BaselineAt)
+		if err != nil {
+			return err
+		}
+		if estimated, ok := CarpoolEstimateWeekly(cost, window.UsedPercent-state.BaselineUsedPercent); ok {
+			state.EstimatedWeeklyUSD = estimated
+		}
+	}
+	state.ApplyToQuota = c.QuotaSource == CarpoolQuotaSourceAuto && carpoolQuotaChanged(c.WeeklyQuotaUSD, state.EstimatedWeeklyUSD)
+	if !newWindow && !state.ApplyToQuota && state.EstimatedWeeklyUSD == c.EstimatedWeeklyUSD {
+		return nil
+	}
+	saved, err := s.repo.SaveEstimateState(ctx, c.ID, &state, c.WindowResetAt)
+	if err != nil || !saved {
+		// 没写成说明其他实例已处理该窗口，重新读一次保持后续同步用最新值
+		if fresh, getErr := s.repo.GetByID(ctx, c.ID); getErr == nil {
+			fresh.MemberCount, fresh.AllocatedPercent = c.MemberCount, c.AllocatedPercent
+			*c = *fresh
+		}
+		return err
+	}
+	c.EstimatedWeeklyUSD = state.EstimatedWeeklyUSD
+	c.WindowResetAt = state.WindowResetAt
+	c.BaselineAt = state.BaselineAt
+	c.BaselineUsedPercent = state.BaselineUsedPercent
+	if state.ApplyToQuota {
+		c.WeeklyQuotaUSD = state.EstimatedWeeklyUSD
+	}
+	return nil
+}
+
+// syncLimits 把额度写到分组（兜底）与各车位订阅，并把订阅周窗口对齐账号窗口。
+// 只改分组周限额，模型定价、倍率等其他分组设置不动；分组页手动改的周限额会被修正回来。
+func (s *CarpoolService) syncLimits(ctx context.Context, c *Carpool, window *carpoolWindowSample) error {
+	if err := s.syncGroupLimit(ctx, c); err != nil {
+		return err
+	}
+	members, err := s.repo.ListMembers(ctx, c.ID)
+	if err != nil {
+		return err
 	}
 	for _, m := range members {
 		if m.SubscriptionID == nil {
 			continue
 		}
-		if err := s.resetMemberWeekly(ctx, *m.SubscriptionID); err != nil {
-			logger.LegacyPrintf("service.carpool", "[Carpool] align weekly window failed: carpool=%d subscription=%d err=%v", carpoolID, *m.SubscriptionID, err)
+		changed, err := s.repo.SetSubscriptionWeeklyLimit(ctx, *m.SubscriptionID, c.MemberWeeklyLimit(m.SharePercent))
+		if err != nil {
+			return err
+		}
+		if window != nil {
+			aligned, err := s.repo.AlignSubscriptionWeeklyWindow(ctx, *m.SubscriptionID, window.ResetAt.Add(-carpoolUpstreamWindow))
+			if err != nil {
+				return err
+			}
+			changed = changed || aligned
+		}
+		if changed {
+			s.invalidateSub(m.UserID, c.GroupID)
 		}
 	}
+	return nil
 }
 
-// syncGroupLimit 只改分组周限额，其他分组配置（模型定价、倍率等）不动。
-// 周限额以拼车为准：分组页手动改过的值也会在这里被修正。
 func (s *CarpoolService) syncGroupLimit(ctx context.Context, c *Carpool) error {
 	group, err := s.adminService.GetGroup(ctx, c.GroupID)
 	if err != nil {
@@ -199,9 +336,10 @@ func (s *CarpoolService) syncGroupLimit(ctx context.Context, c *Carpool) error {
 }
 
 type CarpoolMemberInput struct {
-	UserID int64
-	Email  string
-	Role   string
+	UserID       int64
+	Email        string
+	Role         string
+	SharePercent *float64 // nil 表示按剩余比例均分
 }
 
 type CreateCarpoolInput struct {
@@ -209,7 +347,6 @@ type CreateCarpoolInput struct {
 	AccountID      int64
 	WeeklyQuotaUSD *float64 // 非 nil 表示手动指定账号周额度，否则跟随自动预估
 	Seats          int
-	ReserveRatio   float64
 	ValidityDays   int
 	Notes          string
 	// ExclusiveAccount 为 true 时账号只保留拼车分组，避免车外流量吃掉额度
@@ -222,7 +359,6 @@ type CreateCarpoolInput struct {
 type UpdateCarpoolQuotaInput struct {
 	QuotaSource    *string  // auto 恢复跟随预估
 	WeeklyQuotaUSD *float64 // 非 nil 表示手动指定
-	ReserveRatio   *float64
 }
 
 // AdminUpdateCarpoolInput 仅系统管理员可改的字段 + 额度参数。
@@ -237,21 +373,21 @@ type AdminUpdateCarpoolInput struct {
 // ---------- 视图 ----------
 
 type CarpoolView struct {
-	ID               int64     `json:"id"`
-	Name             string    `json:"name"`
-	AccountID        int64     `json:"account_id"`
-	GroupID          int64     `json:"group_id"`
-	WeeklyQuotaUSD   float64   `json:"weekly_quota_usd"`
-	QuotaSource      string    `json:"quota_source"`
-	Seats            int       `json:"seats"`
-	ReserveRatio     float64   `json:"reserve_ratio"`
-	PerSeatWeeklyUSD float64   `json:"per_seat_weekly_usd"`
-	ValidityDays     int       `json:"validity_days"`
-	Notes            string    `json:"notes"`
-	Status           string    `json:"status"`
-	MemberCount      int       `json:"member_count"`
-	CreatedAt        time.Time `json:"created_at"`
-	MyRole           string    `json:"my_role,omitempty"`
+	ID                 int64     `json:"id"`
+	Name               string    `json:"name"`
+	AccountID          int64     `json:"account_id"`
+	GroupID            int64     `json:"group_id"`
+	WeeklyQuotaUSD     float64   `json:"weekly_quota_usd"`
+	QuotaSource        string    `json:"quota_source"`
+	Seats              int       `json:"seats"`
+	AllocatedPercent   float64   `json:"allocated_percent"`
+	UnallocatedPercent float64   `json:"unallocated_percent"`
+	ValidityDays       int       `json:"validity_days"`
+	Notes              string    `json:"notes"`
+	Status             string    `json:"status"`
+	MemberCount        int       `json:"member_count"`
+	CreatedAt          time.Time `json:"created_at"`
+	MyRole             string    `json:"my_role,omitempty"`
 }
 
 type CarpoolAccountView struct {
@@ -261,6 +397,7 @@ type CarpoolAccountView struct {
 	Type                   string         `json:"type"`
 	Status                 string         `json:"status"`
 	Schedulable            bool           `json:"schedulable"`
+	ResetCardSupported     bool           `json:"reset_card_supported"`
 	ErrorMessage           string         `json:"error_message,omitempty"`
 	RateLimitResetAt       *time.Time     `json:"rate_limit_reset_at,omitempty"`
 	TempUnschedulableUntil *time.Time     `json:"temp_unschedulable_until,omitempty"`
@@ -278,7 +415,6 @@ type CarpoolEstimate struct {
 	WindowResetAt      *time.Time `json:"window_reset_at,omitempty"`
 	MinSamplePercent   float64    `json:"min_sample_percent"`
 	AppliedWeeklyUSD   float64    `json:"applied_weekly_usd"`
-	PerSeatWeeklyUSD   float64    `json:"per_seat_weekly_usd"`
 }
 
 type CarpoolMemberView struct {
@@ -288,11 +424,12 @@ type CarpoolMemberView struct {
 	Role               string     `json:"role"`
 	IsMe               bool       `json:"is_me"`
 	JoinedAt           time.Time  `json:"joined_at"`
+	SharePercent       float64    `json:"share_percent"`
 	SubscriptionID     *int64     `json:"subscription_id,omitempty"`
 	SubscriptionStatus string     `json:"subscription_status,omitempty"`
 	ExpiresAt          *time.Time `json:"expires_at,omitempty"`
 	WeeklyUsageUSD     float64    `json:"weekly_usage_usd"`
-	WeeklyLimitUSD     float64    `json:"weekly_limit_usd"` // 0 表示尚未预估，暂不限额
+	WeeklyLimitUSD     *float64   `json:"weekly_limit_usd"` // nil 表示尚未预估，暂不限额
 	WeeklyResetsAt     *time.Time `json:"weekly_resets_at,omitempty"`
 	DailyUsageUSD      float64    `json:"daily_usage_usd"`
 	MonthlyUsageUSD    float64    `json:"monthly_usage_usd"`
@@ -309,24 +446,44 @@ type CarpoolDetail struct {
 	Members  []CarpoolMemberView `json:"members"`
 }
 
+// CarpoolResetCards 账号重置卡状态。
+type CarpoolResetCards struct {
+	Supported        bool                               `json:"supported"`
+	AvailableCount   int                                `json:"available_count"`
+	Credits          []OpenAIRateLimitResetCreditDetail `json:"credits,omitempty"`
+	UsedPercent      float64                            `json:"used_percent"`
+	ThresholdPercent float64                            `json:"threshold_percent"`
+	CanUse           bool                               `json:"can_use"`
+}
+
+// CarpoolResetCardResult 使用重置卡的结果。
+type CarpoolResetCardResult struct {
+	Result      *OpenAIQuotaResetResult `json:"result"`
+	WarningCode string                  `json:"warning_code,omitempty"`
+}
+
 func carpoolToView(c *Carpool, myRole string) CarpoolView {
 	return CarpoolView{
-		ID:               c.ID,
-		Name:             c.Name,
-		AccountID:        c.AccountID,
-		GroupID:          c.GroupID,
-		WeeklyQuotaUSD:   c.WeeklyQuotaUSD,
-		QuotaSource:      c.QuotaSource,
-		Seats:            c.Seats,
-		ReserveRatio:     c.ReserveRatio,
-		PerSeatWeeklyUSD: c.PerSeatWeeklyUSD(),
-		ValidityDays:     c.ValidityDays,
-		Notes:            c.Notes,
-		Status:           c.Status,
-		MemberCount:      c.MemberCount,
-		CreatedAt:        c.CreatedAt,
-		MyRole:           myRole,
+		ID:                 c.ID,
+		Name:               c.Name,
+		AccountID:          c.AccountID,
+		GroupID:            c.GroupID,
+		WeeklyQuotaUSD:     c.WeeklyQuotaUSD,
+		QuotaSource:        c.QuotaSource,
+		Seats:              c.Seats,
+		AllocatedPercent:   roundCarpoolPercent(c.AllocatedPercent),
+		UnallocatedPercent: roundCarpoolPercent(math.Max(0, 100-c.AllocatedPercent)),
+		ValidityDays:       c.ValidityDays,
+		Notes:              c.Notes,
+		Status:             c.Status,
+		MemberCount:        c.MemberCount,
+		CreatedAt:          c.CreatedAt,
+		MyRole:             myRole,
 	}
+}
+
+func roundCarpoolPercent(v float64) float64 {
+	return math.Round(v*100) / 100
 }
 
 // ---------- 系统管理员 ----------
@@ -338,6 +495,9 @@ func (s *CarpoolService) AdminList(ctx context.Context) ([]CarpoolView, error) {
 	}
 	out := make([]CarpoolView, 0, len(items))
 	for i := range items {
+		if err := s.sync(ctx, &items[i]); err != nil {
+			logger.LegacyPrintf("service.carpool", "[Carpool] sync on list failed: carpool=%d err=%v", items[i].ID, err)
+		}
 		out = append(out, carpoolToView(&items[i], ""))
 	}
 	return out, nil
@@ -353,9 +513,6 @@ func (s *CarpoolService) AdminCreate(ctx context.Context, input *CreateCarpoolIn
 	}
 	if len(input.Members) > input.Seats {
 		return nil, ErrCarpoolSeatsFull
-	}
-	if err := validateCarpoolReserveRatio(input.ReserveRatio); err != nil {
-		return nil, err
 	}
 	source := CarpoolQuotaSourceAuto
 	weekly := 0.0
@@ -389,6 +546,12 @@ func (s *CarpoolService) AdminCreate(ctx context.Context, input *CreateCarpoolIn
 	if err != nil {
 		return nil, err
 	}
+	if err := validateCarpoolMemberShares(members); err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	actor := input.ActorID
 	carpool := &Carpool{
@@ -397,7 +560,6 @@ func (s *CarpoolService) AdminCreate(ctx context.Context, input *CreateCarpoolIn
 		WeeklyQuotaUSD: weekly,
 		QuotaSource:    source,
 		Seats:          input.Seats,
-		ReserveRatio:   input.ReserveRatio,
 		ValidityDays:   validityDays,
 		Notes:          strings.TrimSpace(input.Notes),
 		Status:         domain.StatusActive,
@@ -436,20 +598,21 @@ func (s *CarpoolService) AdminCreate(ctx context.Context, input *CreateCarpoolIn
 	}
 
 	for _, m := range members {
-		if err := s.addMember(ctx, carpool, m.user, m.role, input.ActorID); err != nil {
+		if err := s.addMemberLocked(ctx, carpool, m, input.ActorID); err != nil {
 			return nil, err
 		}
 	}
-	carpool.MemberCount = len(members)
-	// 记录建车时的窗口基线，失败不影响建车，后台任务会重试
-	if err := s.refreshEstimate(ctx, carpool, time.Now()); err != nil {
-		logger.LegacyPrintf("service.carpool", "[Carpool] initial estimate failed: carpool=%d err=%v", carpool.ID, err)
+	// 记录建车时的窗口基线并下发各车位额度，失败不影响建车，定时同步会重试
+	if err := s.syncLocked(ctx, carpool, time.Now()); err != nil {
+		logger.LegacyPrintf("service.carpool", "[Carpool] initial sync failed: carpool=%d err=%v", carpool.ID, err)
 	}
 	view := carpoolToView(carpool, "")
 	return &view, nil
 }
 
 func (s *CarpoolService) AdminUpdate(ctx context.Context, id int64, input *AdminUpdateCarpoolInput) (*CarpoolView, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	carpool, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -475,7 +638,7 @@ func (s *CarpoolService) AdminUpdate(ctx context.Context, id int64, input *Admin
 	if err := applyCarpoolQuotaInput(carpool, &input.UpdateCarpoolQuotaInput); err != nil {
 		return nil, err
 	}
-	if err := s.saveAndSyncLimit(ctx, carpool); err != nil {
+	if err := s.saveAndSyncLocked(ctx, carpool); err != nil {
 		return nil, err
 	}
 	view := carpoolToView(carpool, "")
@@ -483,6 +646,8 @@ func (s *CarpoolService) AdminUpdate(ctx context.Context, id int64, input *Admin
 }
 
 func (s *CarpoolService) AdminDelete(ctx context.Context, id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	carpool, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return err
@@ -500,22 +665,37 @@ func (s *CarpoolService) AdminDelete(ctx context.Context, id int64) error {
 	return s.repo.SoftDelete(ctx, id)
 }
 
+// AdminAddMember 加车位：同时给该用户分配拼车分组订阅。
 func (s *CarpoolService) AdminAddMember(ctx context.Context, id int64, input CarpoolMemberInput, actorID int64) error {
+	resolved, err := s.resolveMembers(ctx, []CarpoolMemberInput{input})
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	carpool, err := s.repo.GetByID(ctx, id)
 	if err != nil {
+		return err
+	}
+	if err := s.reconcileMembers(ctx, carpool); err != nil {
 		return err
 	}
 	if carpool.MemberCount >= carpool.Seats {
 		return ErrCarpoolSeatsFull
 	}
-	resolved, err := s.resolveMembers(ctx, []CarpoolMemberInput{input})
-	if err != nil {
+	if share := resolved[0].share; share != nil && carpool.AllocatedPercent+*share > 100+1e-6 {
+		return ErrCarpoolInvalidShare
+	}
+	if err := s.addMemberLocked(ctx, carpool, resolved[0], actorID); err != nil {
 		return err
 	}
-	return s.addMember(ctx, carpool, resolved[0].user, resolved[0].role, actorID)
+	return s.syncLocked(ctx, carpool, time.Now())
 }
 
+// AdminRemoveMember 释放车位：同时撤销该成员的拼车分组订阅。
 func (s *CarpoolService) AdminRemoveMember(ctx context.Context, id, userID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	member, err := s.repo.GetMember(ctx, id, userID)
 	if err != nil {
 		return err
@@ -535,6 +715,53 @@ func (s *CarpoolService) AdminSetMemberRole(ctx context.Context, id, userID int6
 	return s.repo.UpdateMemberRole(ctx, id, userID, normalized)
 }
 
+// SetMemberShare 调整车位可用额度百分比；actorID=0 表示系统管理员，否则须是车内 manager。
+func (s *CarpoolService) SetMemberShare(ctx context.Context, id, actorID, userID int64, sharePercent float64) (*CarpoolView, error) {
+	if err := validateCarpoolShare(sharePercent); err != nil {
+		return nil, err
+	}
+	role := ""
+	if actorID != 0 {
+		_, actor, err := s.loadForManager(ctx, id, actorID)
+		if err != nil {
+			return nil, err
+		}
+		role = actor.Role
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	carpool, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	members, err := s.repo.ListMembers(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	others, found := 0.0, false
+	for _, m := range members {
+		if m.UserID == userID {
+			found = true
+			continue
+		}
+		others += m.SharePercent
+	}
+	if !found {
+		return nil, ErrCarpoolMemberNotFound
+	}
+	if others+sharePercent > 100+1e-6 {
+		return nil, ErrCarpoolInvalidShare
+	}
+	if err := s.repo.UpdateMemberShare(ctx, id, userID, roundCarpoolPercent(sharePercent)); err != nil {
+		return nil, err
+	}
+	if err := s.syncLocked(ctx, carpool, time.Now()); err != nil {
+		return nil, err
+	}
+	view := carpoolToView(carpool, role)
+	return &view, nil
+}
+
 // AdminRenew 给所有成员续期一个周期（ValidityDays 天）。
 func (s *CarpoolService) AdminRenew(ctx context.Context, id, actorID int64) error {
 	carpool, err := s.repo.GetByID(ctx, id)
@@ -546,23 +773,17 @@ func (s *CarpoolService) AdminRenew(ctx context.Context, id, actorID int64) erro
 		return err
 	}
 	for _, m := range members {
-		sub, _, err := s.subscriptionService.AssignOrExtendSubscription(ctx, &AssignSubscriptionInput{
+		if _, _, err := s.subscriptionService.AssignOrExtendSubscription(ctx, &AssignSubscriptionInput{
 			UserID:       m.UserID,
 			GroupID:      carpool.GroupID,
 			ValidityDays: carpool.ValidityDays,
 			AssignedBy:   actorID,
 			Notes:        fmt.Sprintf("carpool #%d renew", carpool.ID),
-		})
-		if err != nil {
+		}); err != nil {
 			return fmt.Errorf("renew subscription for user %d: %w", m.UserID, err)
 		}
-		if m.SubscriptionID == nil || *m.SubscriptionID != sub.ID {
-			if err := s.repo.SetMemberSubscription(ctx, carpool.ID, m.UserID, sub.ID); err != nil {
-				return err
-			}
-		}
 	}
-	return nil
+	return s.sync(ctx, carpool)
 }
 
 func (s *CarpoolService) AdminGetDetail(ctx context.Context, id int64) (*CarpoolDetail, error) {
@@ -570,11 +791,15 @@ func (s *CarpoolService) AdminGetDetail(ctx context.Context, id int64) (*Carpool
 	if err != nil {
 		return nil, err
 	}
+	if err := s.sync(ctx, carpool); err != nil {
+		logger.LegacyPrintf("service.carpool", "[Carpool] sync on detail failed: carpool=%d err=%v", id, err)
+	}
 	return s.buildDetail(ctx, carpool, 0, "", false)
 }
 
 // ---------- 车内成员 ----------
 
+// ListMine 列出用户所在的拼车；在订阅页刚分配的拼车分组订阅也会在这里同步成车位。
 func (s *CarpoolService) ListMine(ctx context.Context, userID int64) ([]CarpoolView, error) {
 	items, err := s.repo.ListByUser(ctx, userID)
 	if err != nil {
@@ -582,32 +807,51 @@ func (s *CarpoolService) ListMine(ctx context.Context, userID int64) ([]CarpoolV
 	}
 	out := make([]CarpoolView, 0, len(items))
 	for i := range items {
-		role := ""
-		if m, err := s.repo.GetMember(ctx, items[i].ID, userID); err == nil {
-			role = m.Role
+		if err := s.sync(ctx, &items[i]); err != nil {
+			logger.LegacyPrintf("service.carpool", "[Carpool] sync on list failed: carpool=%d err=%v", items[i].ID, err)
 		}
-		out = append(out, carpoolToView(&items[i], role))
+		m, err := s.repo.GetMember(ctx, items[i].ID, userID)
+		if err != nil {
+			continue // 订阅已撤销，车位刚被释放
+		}
+		out = append(out, carpoolToView(&items[i], m.Role))
 	}
 	return out, nil
 }
 
 func (s *CarpoolService) GetDetail(ctx context.Context, id, userID int64) (*CarpoolDetail, error) {
-	carpool, member, err := s.loadForMember(ctx, id, userID)
+	carpool, err := s.repo.GetByID(ctx, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.sync(ctx, carpool); err != nil {
+		logger.LegacyPrintf("service.carpool", "[Carpool] sync on detail failed: carpool=%d err=%v", id, err)
+	}
+	member, err := s.repo.GetMember(ctx, id, userID)
+	if err != nil {
+		if errors.Is(err, ErrCarpoolMemberNotFound) {
+			return nil, ErrCarpoolNotFound
+		}
 		return nil, err
 	}
 	return s.buildDetail(ctx, carpool, userID, member.Role, true)
 }
 
 func (s *CarpoolService) ManagerUpdateQuota(ctx context.Context, id, userID int64, input *UpdateCarpoolQuotaInput) (*CarpoolView, error) {
-	carpool, member, err := s.loadForManager(ctx, id, userID)
+	_, member, err := s.loadForManager(ctx, id, userID)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	carpool, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	if err := applyCarpoolQuotaInput(carpool, input); err != nil {
 		return nil, err
 	}
-	if err := s.saveAndSyncLimit(ctx, carpool); err != nil {
+	if err := s.saveAndSyncLocked(ctx, carpool); err != nil {
 		return nil, err
 	}
 	view := carpoolToView(carpool, member.Role)
@@ -623,15 +867,7 @@ const (
 
 // AccountAction 车内 manager 对本车账号的运维操作；userID=0 表示系统管理员调用。
 func (s *CarpoolService) AccountAction(ctx context.Context, id, userID int64, action string, schedulable *bool) error {
-	var (
-		carpool *Carpool
-		err     error
-	)
-	if userID == 0 {
-		carpool, err = s.repo.GetByID(ctx, id)
-	} else {
-		carpool, _, err = s.loadForManager(ctx, id, userID)
-	}
+	carpool, err := s.loadCarpoolForManager(ctx, id, userID)
 	if err != nil {
 		return err
 	}
@@ -647,7 +883,7 @@ func (s *CarpoolService) AccountAction(ctx context.Context, id, userID int64, ac
 		err = s.rateLimitService.ClearRateLimit(ctx, carpool.AccountID)
 	case CarpoolAccountActionRefreshUsage:
 		if _, err = s.accountUsageService.GetUsage(ctx, carpool.AccountID, true); err == nil {
-			err = s.refreshEstimate(ctx, carpool, time.Now())
+			err = s.sync(ctx, carpool)
 		}
 	default:
 		return ErrCarpoolInvalidAction
@@ -655,11 +891,113 @@ func (s *CarpoolService) AccountAction(ctx context.Context, id, userID int64, ac
 	return err
 }
 
+// GetResetCards 查看账号重置卡；所有成员可看，manager 在整车用量达标后可用。userID=0 表示系统管理员。
+func (s *CarpoolService) GetResetCards(ctx context.Context, id, userID int64) (*CarpoolResetCards, error) {
+	carpool, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	canManage := userID == 0
+	if userID != 0 {
+		member, err := s.repo.GetMember(ctx, id, userID)
+		if err != nil {
+			if errors.Is(err, ErrCarpoolMemberNotFound) {
+				return nil, ErrCarpoolNotFound
+			}
+			return nil, err
+		}
+		canManage = member.Role == CarpoolRoleManager
+	}
+	cards, _, err := s.queryResetCards(ctx, carpool)
+	if err != nil || !cards.Supported {
+		return cards, err
+	}
+	cards.CanUse = canManage && cards.AvailableCount > 0 && cards.UsedPercent >= CarpoolResetCardThresholdPercent
+	return cards, nil
+}
+
+// UseResetCard 使用一张账号重置卡：仅 manager，且整车（账号 7 天窗口）已用满 80%。
+// 用后立即同步，成员周用量随账号窗口重置清零。
+func (s *CarpoolService) UseResetCard(ctx context.Context, id, userID int64) (*CarpoolResetCardResult, error) {
+	carpool, err := s.loadCarpoolForManager(ctx, id, userID)
+	if err != nil {
+		return nil, err
+	}
+	cards, account, err := s.queryResetCards(ctx, carpool)
+	if err != nil {
+		return nil, err
+	}
+	if !cards.Supported {
+		return nil, ErrCarpoolResetUnsupported
+	}
+	if cards.UsedPercent < CarpoolResetCardThresholdPercent {
+		return nil, ErrCarpoolResetNotAllowed
+	}
+	result, err := s.quotaService.ResetCredit(ctx, account.ID)
+	if err != nil {
+		return nil, err
+	}
+	post := RunOpenAIQuotaResetPostProcess(ctx, account.ID, s.quotaService, s.rateLimitService, s.adminService.GetAccount)
+	if err := s.sync(ctx, carpool); err != nil {
+		logger.LegacyPrintf("service.carpool", "[Carpool] sync after reset card failed: carpool=%d err=%v", carpool.ID, err)
+	}
+	return &CarpoolResetCardResult{Result: result, WarningCode: post.WarningCode}, nil
+}
+
+// queryResetCards 实时查询上游重置卡与 7 天窗口用量；整车用量取上游与本地快照中较大者。
+func (s *CarpoolService) queryResetCards(ctx context.Context, carpool *Carpool) (*CarpoolResetCards, *Account, error) {
+	cards := &CarpoolResetCards{ThresholdPercent: CarpoolResetCardThresholdPercent}
+	account, err := s.adminService.GetAccount(ctx, carpool.AccountID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !carpoolSupportsResetCard(account) || s.quotaService == nil {
+		return cards, account, nil
+	}
+	cards.Supported = true
+	if window := carpoolWindowFromAccount(account, time.Now()); window != nil {
+		cards.UsedPercent = window.UsedPercent
+	}
+	usage, err := s.quotaService.QueryUsage(ctx, account.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if usage.RateLimitResetCredits != nil {
+		cards.AvailableCount = usage.RateLimitResetCredits.AvailableCount
+		cards.Credits = usage.RateLimitResetCredits.Credits
+	}
+	if used, ok := openAIWeeklyUsedPercent(usage.RateLimit); ok && used > cards.UsedPercent {
+		cards.UsedPercent = used
+	}
+	return cards, account, nil
+}
+
+func carpoolSupportsResetCard(account *Account) bool {
+	return account != nil && account.Platform == domain.PlatformOpenAI && account.IsOAuth()
+}
+
+// openAIWeeklyUsedPercent 从上游限额信封里取 7 天窗口已用百分比。
+func openAIWeeklyUsedPercent(limit *OpenAIRateLimit) (float64, bool) {
+	if limit == nil {
+		return 0, false
+	}
+	for _, w := range []*OpenAIRateLimitWindow{limit.SecondaryWindow, limit.PrimaryWindow} {
+		if w != nil && w.LimitWindowSeconds >= int64((6*24*time.Hour).Seconds()) {
+			return w.UsedPercent, true
+		}
+	}
+	if limit.SecondaryWindow != nil {
+		return limit.SecondaryWindow.UsedPercent, true
+	}
+	return 0, false
+}
+
 // ---------- 内部 ----------
 
 type resolvedCarpoolMember struct {
-	user *User
-	role string
+	user  *User
+	role  string
+	share *float64
 }
 
 func (s *CarpoolService) resolveMembers(ctx context.Context, inputs []CarpoolMemberInput) ([]resolvedCarpoolMember, error) {
@@ -669,6 +1007,11 @@ func (s *CarpoolService) resolveMembers(ctx context.Context, inputs []CarpoolMem
 		role, err := normalizeCarpoolRole(in.Role)
 		if err != nil {
 			return nil, err
+		}
+		if in.SharePercent != nil {
+			if err := validateCarpoolShare(*in.SharePercent); err != nil {
+				return nil, err
+			}
 		}
 		var user *User
 		if in.UserID > 0 {
@@ -685,33 +1028,64 @@ func (s *CarpoolService) resolveMembers(ctx context.Context, inputs []CarpoolMem
 			return nil, ErrCarpoolMemberExists
 		}
 		seen[user.ID] = struct{}{}
-		out = append(out, resolvedCarpoolMember{user: user, role: role})
+		out = append(out, resolvedCarpoolMember{user: user, role: role, share: in.SharePercent})
 	}
 	return out, nil
 }
 
-func (s *CarpoolService) addMember(ctx context.Context, carpool *Carpool, user *User, role string, actorID int64) error {
-	if _, err := s.repo.GetMember(ctx, carpool.ID, user.ID); err == nil {
+func validateCarpoolMemberShares(members []resolvedCarpoolMember) error {
+	total := 0.0
+	for _, m := range members {
+		if m.share != nil {
+			total += *m.share
+		}
+	}
+	if total > 100+1e-6 {
+		return ErrCarpoolInvalidShare
+	}
+	return nil
+}
+
+// addMemberLocked 加车位并分配订阅；订阅回调可能先一步补了车位，此时以本次指定的角色与比例为准。
+func (s *CarpoolService) addMemberLocked(ctx context.Context, carpool *Carpool, m resolvedCarpoolMember, actorID int64) error {
+	if _, err := s.repo.GetMember(ctx, carpool.ID, m.user.ID); err == nil {
 		return ErrCarpoolMemberExists
 	} else if !errors.Is(err, ErrCarpoolMemberNotFound) {
 		return err
 	}
+	share := carpool.DefaultSharePercent()
+	if m.share != nil {
+		share = *m.share
+	}
 	sub, _, err := s.subscriptionService.AssignOrExtendSubscription(ctx, &AssignSubscriptionInput{
-		UserID:       user.ID,
+		UserID:       m.user.ID,
 		GroupID:      carpool.GroupID,
 		ValidityDays: carpool.ValidityDays,
 		AssignedBy:   actorID,
 		Notes:        fmt.Sprintf("carpool #%d", carpool.ID),
 	})
 	if err != nil {
-		return fmt.Errorf("assign carpool subscription to user %d: %w", user.ID, err)
+		return fmt.Errorf("assign carpool subscription to user %d: %w", m.user.ID, err)
 	}
-	return s.repo.AddMember(ctx, &CarpoolMember{
+	err = s.repo.AddMember(ctx, &CarpoolMember{
 		CarpoolID:      carpool.ID,
-		UserID:         user.ID,
+		UserID:         m.user.ID,
 		SubscriptionID: &sub.ID,
-		Role:           role,
+		Role:           m.role,
+		SharePercent:   share,
 	})
+	if errors.Is(err, ErrCarpoolMemberExists) {
+		if err := s.repo.UpdateMemberRole(ctx, carpool.ID, m.user.ID, m.role); err != nil {
+			return err
+		}
+		err = s.repo.UpdateMemberShare(ctx, carpool.ID, m.user.ID, share)
+	}
+	if err != nil {
+		return err
+	}
+	carpool.MemberCount++
+	carpool.AllocatedPercent += share
+	return nil
 }
 
 func (s *CarpoolService) revokeMemberSubscription(ctx context.Context, m *CarpoolMember) {
@@ -748,15 +1122,18 @@ func (s *CarpoolService) loadForManager(ctx context.Context, id, userID int64) (
 	return carpool, member, nil
 }
 
+// loadCarpoolForManager userID=0 表示系统管理员，否则须是车内 manager。
+func (s *CarpoolService) loadCarpoolForManager(ctx context.Context, id, userID int64) (*Carpool, error) {
+	if userID == 0 {
+		return s.repo.GetByID(ctx, id)
+	}
+	carpool, _, err := s.loadForManager(ctx, id, userID)
+	return carpool, err
+}
+
 func applyCarpoolQuotaInput(c *Carpool, in *UpdateCarpoolQuotaInput) error {
 	if in == nil {
 		return nil
-	}
-	if in.ReserveRatio != nil {
-		if err := validateCarpoolReserveRatio(*in.ReserveRatio); err != nil {
-			return err
-		}
-		c.ReserveRatio = *in.ReserveRatio
 	}
 	switch {
 	case in.QuotaSource != nil && *in.QuotaSource == CarpoolQuotaSourceAuto:
@@ -772,12 +1149,12 @@ func applyCarpoolQuotaInput(c *Carpool, in *UpdateCarpoolQuotaInput) error {
 	return nil
 }
 
-// saveAndSyncLimit 持久化拼车并把每人周额度同步到分组周限额。
-func (s *CarpoolService) saveAndSyncLimit(ctx context.Context, c *Carpool) error {
+// saveAndSyncLocked 持久化拼车并重新下发额度（调用方已持锁）。
+func (s *CarpoolService) saveAndSyncLocked(ctx context.Context, c *Carpool) error {
 	if err := s.repo.Update(ctx, c); err != nil {
 		return err
 	}
-	return s.syncGroupLimit(ctx, c)
+	return s.syncLocked(ctx, c, time.Now())
 }
 
 func (s *CarpoolService) buildEstimate(ctx context.Context, c *Carpool, window *carpoolWindowSample) CarpoolEstimate {
@@ -787,7 +1164,6 @@ func (s *CarpoolService) buildEstimate(ctx context.Context, c *Carpool, window *
 		SampleStart:        c.BaselineAt,
 		MinSamplePercent:   CarpoolMinEstimatePercent,
 		AppliedWeeklyUSD:   c.WeeklyQuotaUSD,
-		PerSeatWeeklyUSD:   c.PerSeatWeeklyUSD(),
 	}
 	if window == nil || c.BaselineAt == nil || window.isNewWindow(c) {
 		return est
@@ -812,6 +1188,7 @@ func (s *CarpoolService) buildDetail(ctx context.Context, c *Carpool, viewerID i
 			Type:                   account.Type,
 			Status:                 account.Status,
 			Schedulable:            account.Schedulable,
+			ResetCardSupported:     carpoolSupportsResetCard(account) && s.quotaService != nil,
 			ErrorMessage:           account.ErrorMessage,
 			RateLimitResetAt:       account.RateLimitResetAt,
 			TempUnschedulableUntil: account.TempUnschedulableUntil,
@@ -832,7 +1209,6 @@ func (s *CarpoolService) buildDetail(ctx context.Context, c *Carpool, viewerID i
 	if err != nil {
 		return nil, err
 	}
-	perSeat := c.PerSeatWeeklyUSD()
 	detail.Members = make([]CarpoolMemberView, 0, len(members))
 	for _, m := range members {
 		email := m.Email
@@ -846,10 +1222,11 @@ func (s *CarpoolService) buildDetail(ctx context.Context, c *Carpool, viewerID i
 			Role:           m.Role,
 			IsMe:           viewerID != 0 && m.UserID == viewerID,
 			JoinedAt:       m.CreatedAt,
+			SharePercent:   m.SharePercent,
 			SubscriptionID: m.SubscriptionID,
-			WeeklyLimitUSD: perSeat,
+			WeeklyLimitUSD: c.MemberWeeklyLimit(m.SharePercent),
 		}
-		if m.SubscriptionID != nil {
+		if m.SubscriptionID != nil && s.subscriptionService != nil {
 			if sub, err := s.subscriptionService.GetByID(ctx, *m.SubscriptionID); err == nil && sub != nil {
 				view.SubscriptionStatus = sub.Status
 				expires := sub.ExpiresAt
@@ -860,7 +1237,7 @@ func (s *CarpoolService) buildDetail(ctx context.Context, c *Carpool, viewerID i
 				view.MonthlyUsageUSD = sub.MonthlyUsageUSD
 			}
 		}
-		// 成员周用量随账号窗口一起清零，有上游快照时以它的重置时间为准
+		// 成员周窗口对齐账号窗口，有上游快照时以它的重置时间为准
 		if window != nil {
 			resetAt := window.ResetAt
 			view.WeeklyResetsAt = &resetAt

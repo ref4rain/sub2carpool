@@ -69,6 +69,13 @@ func (UserSubscription) Fields() []ent.Field {
 			SchemaType(map[string]string{dialect.Postgres: "decimal(20,10)"}).
 			Default(0),
 
+		// 订阅级周限额覆盖（added by migration 251，拼车按座位比例分配额度用）；
+		// nil 表示沿用分组的 weekly_limit_usd。
+		field.Float("weekly_limit_usd").
+			Optional().
+			Nillable().
+			SchemaType(map[string]string{dialect.Postgres: "decimal(20,8)"}),
+
 		field.Int64("assigned_by").
 			Optional().
 			Nillable(),

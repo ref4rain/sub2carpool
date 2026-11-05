@@ -28,22 +28,28 @@ const (
 	carpoolWindowResetTolerance = time.Hour
 	// 预估变化小于该比例时不改额度，避免频繁刷新分组与认证缓存
 	carpoolQuotaChangeTolerance = 0.01
+
+	// 整车（账号 7 天窗口）用量达到该百分比后，车内 manager 才能使用重置卡
+	CarpoolResetCardThresholdPercent = 80.0
 )
 
 var (
-	ErrCarpoolNotFound        = infraerrors.NotFound("CARPOOL_NOT_FOUND", "carpool not found")
-	ErrCarpoolForbidden       = infraerrors.Forbidden("CARPOOL_FORBIDDEN", "only carpool managers can do this")
-	ErrCarpoolAccountTaken    = infraerrors.Conflict("CARPOOL_ACCOUNT_TAKEN", "account already belongs to another carpool")
-	ErrCarpoolAccountPlatform = infraerrors.BadRequest("CARPOOL_ACCOUNT_PLATFORM", "carpool only supports openai accounts")
-	ErrCarpoolInvalidSeats    = infraerrors.BadRequest("CARPOOL_INVALID_SEATS", "seats must be between 1 and 10")
-	ErrCarpoolSeatsFull       = infraerrors.BadRequest("CARPOOL_SEATS_FULL", "carpool has no free seat")
-	ErrCarpoolSeatsBelowCount = infraerrors.BadRequest("CARPOOL_SEATS_BELOW_MEMBERS", "seats cannot be fewer than current members")
-	ErrCarpoolInvalidQuota    = infraerrors.BadRequest("CARPOOL_INVALID_QUOTA", "manual weekly quota must be > 0, reserve ratio in [0,1)")
-	ErrCarpoolInvalidName     = infraerrors.BadRequest("CARPOOL_INVALID_NAME", "carpool name is required")
-	ErrCarpoolInvalidAction   = infraerrors.BadRequest("CARPOOL_INVALID_ACTION", "invalid account action")
-	ErrCarpoolMemberExists    = infraerrors.Conflict("CARPOOL_MEMBER_EXISTS", "user is already in this carpool")
-	ErrCarpoolMemberNotFound  = infraerrors.NotFound("CARPOOL_MEMBER_NOT_FOUND", "carpool member not found")
-	ErrCarpoolInvalidRole     = infraerrors.BadRequest("CARPOOL_INVALID_ROLE", "role must be manager or member")
+	ErrCarpoolNotFound         = infraerrors.NotFound("CARPOOL_NOT_FOUND", "carpool not found")
+	ErrCarpoolForbidden        = infraerrors.Forbidden("CARPOOL_FORBIDDEN", "only carpool managers can do this")
+	ErrCarpoolAccountTaken     = infraerrors.Conflict("CARPOOL_ACCOUNT_TAKEN", "account already belongs to another carpool")
+	ErrCarpoolAccountPlatform  = infraerrors.BadRequest("CARPOOL_ACCOUNT_PLATFORM", "carpool only supports openai accounts")
+	ErrCarpoolInvalidSeats     = infraerrors.BadRequest("CARPOOL_INVALID_SEATS", "seats must be between 1 and 10")
+	ErrCarpoolSeatsFull        = infraerrors.BadRequest("CARPOOL_SEATS_FULL", "carpool has no free seat")
+	ErrCarpoolSeatsBelowCount  = infraerrors.BadRequest("CARPOOL_SEATS_BELOW_MEMBERS", "seats cannot be fewer than current members")
+	ErrCarpoolInvalidQuota     = infraerrors.BadRequest("CARPOOL_INVALID_QUOTA", "manual weekly quota must be > 0")
+	ErrCarpoolInvalidShare     = infraerrors.BadRequest("CARPOOL_INVALID_SHARE", "share percent must be within [0,100] and all seats together cannot exceed 100")
+	ErrCarpoolResetNotAllowed  = infraerrors.BadRequest("CARPOOL_RESET_NOT_ALLOWED", "reset card can only be used after the carpool has used 80% of the 7-day window")
+	ErrCarpoolResetUnsupported = infraerrors.BadRequest("CARPOOL_RESET_UNSUPPORTED", "reset cards are only available for OpenAI OAuth accounts")
+	ErrCarpoolInvalidName      = infraerrors.BadRequest("CARPOOL_INVALID_NAME", "carpool name is required")
+	ErrCarpoolInvalidAction    = infraerrors.BadRequest("CARPOOL_INVALID_ACTION", "invalid account action")
+	ErrCarpoolMemberExists     = infraerrors.Conflict("CARPOOL_MEMBER_EXISTS", "user is already in this carpool")
+	ErrCarpoolMemberNotFound   = infraerrors.NotFound("CARPOOL_MEMBER_NOT_FOUND", "carpool member not found")
+	ErrCarpoolInvalidRole      = infraerrors.BadRequest("CARPOOL_INVALID_ROLE", "role must be manager or member")
 )
 
 type Carpool struct {
@@ -54,7 +60,6 @@ type Carpool struct {
 	WeeklyQuotaUSD float64
 	QuotaSource    string
 	Seats          int
-	ReserveRatio   float64
 	ValidityDays   int
 	Notes          string
 	Status         string
@@ -68,12 +73,30 @@ type Carpool struct {
 	BaselineAt          *time.Time
 	BaselineUsedPercent float64
 
-	MemberCount int
+	MemberCount      int
+	AllocatedPercent float64 // 已分配给各车位的百分比合计
 }
 
-// PerSeatWeeklyUSD 每人周额度；0 表示尚未预估。
-func (c *Carpool) PerSeatWeeklyUSD() float64 {
-	return CarpoolPerSeatWeeklyUSD(c.WeeklyQuotaUSD, c.ReserveRatio, c.Seats)
+// MemberWeeklyLimit 车位周额度 = 账号周额度 × 车位百分比；尚未预估时返回 nil（不限额）。
+func (c *Carpool) MemberWeeklyLimit(sharePercent float64) *float64 {
+	if c.WeeklyQuotaUSD <= 0 {
+		return nil
+	}
+	limit := CarpoolShareWeeklyUSD(c.WeeklyQuotaUSD, sharePercent)
+	return &limit
+}
+
+// DefaultSharePercent 新车位默认比例：剩余未分配比例均分给空车位（调用前 MemberCount 不含新成员）。
+func (c *Carpool) DefaultSharePercent() float64 {
+	free := c.Seats - c.MemberCount
+	if free < 1 {
+		free = 1
+	}
+	remaining := 100 - c.AllocatedPercent
+	if remaining <= 0 {
+		return 0
+	}
+	return math.Floor(remaining/float64(free)*100) / 100
 }
 
 type CarpoolMember struct {
@@ -82,6 +105,7 @@ type CarpoolMember struct {
 	UserID         int64
 	SubscriptionID *int64
 	Role           string
+	SharePercent   float64
 	CreatedAt      time.Time
 
 	Email    string
@@ -124,8 +148,17 @@ type CarpoolRepository interface {
 	GetMember(ctx context.Context, carpoolID, userID int64) (*CarpoolMember, error)
 	AddMember(ctx context.Context, m *CarpoolMember) error
 	UpdateMemberRole(ctx context.Context, carpoolID, userID int64, role string) error
+	UpdateMemberShare(ctx context.Context, carpoolID, userID int64, sharePercent float64) error
 	SetMemberSubscription(ctx context.Context, carpoolID, userID, subscriptionID int64) error
 	RemoveMember(ctx context.Context, carpoolID, userID int64) error
+
+	// ListLiveGroupSubscriptions 拼车分组下未撤销的订阅：user_id -> subscription_id
+	ListLiveGroupSubscriptions(ctx context.Context, groupID int64) (map[int64]int64, error)
+	// SetSubscriptionWeeklyLimit 写订阅级周限额覆盖，返回是否有变化
+	SetSubscriptionWeeklyLimit(ctx context.Context, subscriptionID int64, limit *float64) (bool, error)
+	// AlignSubscriptionWeeklyWindow 把订阅周窗口起点对齐到账号窗口起点 start（偏差小于 1 小时不动）；
+	// 起点早于 start 的订阅属于上一个账号窗口，同时清零周用量。返回是否有变化。
+	AlignSubscriptionWeeklyWindow(ctx context.Context, subscriptionID int64, start time.Time) (bool, error)
 
 	// GetGroupUsageByUser 统计分组内每个用户自 since 起的用量。
 	GetGroupUsageByUser(ctx context.Context, groupID int64, since time.Time) (map[int64]*CarpoolMemberUsage, error)
@@ -142,12 +175,12 @@ func CarpoolEstimateWeekly(sampleCostUSD, sampleUsedPercent float64) (float64, b
 	return roundCarpoolUSD(sampleCostUSD / (sampleUsedPercent / 100)), true
 }
 
-// CarpoolPerSeatWeeklyUSD 每人周额度 = 账号周额度 × (1 - 预留比例) ÷ 座位数。
-func CarpoolPerSeatWeeklyUSD(weeklyQuotaUSD, reserveRatio float64, seats int) float64 {
-	if seats <= 0 || weeklyQuotaUSD <= 0 {
+// CarpoolShareWeeklyUSD 车位周额度 = 账号周额度 × 车位百分比。
+func CarpoolShareWeeklyUSD(weeklyQuotaUSD, sharePercent float64) float64 {
+	if weeklyQuotaUSD <= 0 || sharePercent <= 0 {
 		return 0
 	}
-	return roundCarpoolUSD(weeklyQuotaUSD * (1 - reserveRatio) / float64(seats))
+	return roundCarpoolUSD(weeklyQuotaUSD * sharePercent / 100)
 }
 
 func roundCarpoolUSD(v float64) float64 {
@@ -161,9 +194,9 @@ func validateCarpoolSeats(seats int) error {
 	return nil
 }
 
-func validateCarpoolReserveRatio(ratio float64) error {
-	if ratio < 0 || ratio >= 1 {
-		return ErrCarpoolInvalidQuota
+func validateCarpoolShare(share float64) error {
+	if share < 0 || share > 100 || math.IsNaN(share) {
+		return ErrCarpoolInvalidShare
 	}
 	return nil
 }
@@ -179,10 +212,11 @@ func normalizeCarpoolRole(role string) (string, error) {
 	}
 }
 
-// carpoolGroupWeeklyLimit 分组周限额：尚未预估时取负数，让分组暂不限额，而不是 0（0 表示禁止使用）。
+// carpoolGroupWeeklyLimit 分组周限额只作兜底（各车位的实际额度写在订阅覆盖上）：
+// 有预估时取整车额度，尚未预估时取负数让分组暂不限额，而不是 0（0 表示禁止使用）。
 func carpoolGroupWeeklyLimit(c *Carpool) float64 {
-	if perSeat := c.PerSeatWeeklyUSD(); perSeat > 0 {
-		return perSeat
+	if c.WeeklyQuotaUSD > 0 {
+		return c.WeeklyQuotaUSD
 	}
 	return -1
 }

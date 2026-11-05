@@ -56,6 +56,8 @@ const (
 	subFieldWeeklyUsage  = "weekly_usage"
 	subFieldMonthlyUsage = "monthly_usage"
 	subFieldVersion      = "version"
+	// 订阅级周限额覆盖；字段缺失表示沿用分组周限额
+	subFieldWeeklyLimit = "weekly_limit"
 )
 
 // billingRateLimitKey generates the Redis key for API key rate limit cache.
@@ -216,6 +218,12 @@ func (c *billingCache) parseSubscriptionCache(data map[string]string) (*service.
 		result.Version, _ = strconv.ParseInt(versionStr, 10, 64)
 	}
 
+	if limitStr, ok := data[subFieldWeeklyLimit]; ok && limitStr != "" {
+		if limit, err := strconv.ParseFloat(limitStr, 64); err == nil {
+			result.WeeklyLimit = &limit
+		}
+	}
+
 	return result, nil
 }
 
@@ -236,6 +244,11 @@ func (c *billingCache) SetSubscriptionCache(ctx context.Context, userID, groupID
 	}
 
 	pipe := c.rdb.Pipeline()
+	if data.WeeklyLimit != nil {
+		fields[subFieldWeeklyLimit] = *data.WeeklyLimit
+	} else {
+		pipe.HDel(ctx, key, subFieldWeeklyLimit)
+	}
 	pipe.HSet(ctx, key, fields)
 	pipe.Expire(ctx, key, jitteredTTL())
 	_, err := pipe.Exec(ctx)

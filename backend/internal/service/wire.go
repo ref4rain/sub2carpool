@@ -446,9 +446,12 @@ func ProvideCarpoolService(
 	subscriptionService *SubscriptionService,
 	accountUsageService *AccountUsageService,
 	rateLimitService *RateLimitService,
+	quotaService *OpenAIQuotaService,
 	userRepo UserRepository,
 ) *CarpoolService {
-	svc := NewCarpoolService(repo, adminService, subscriptionService, accountUsageService, rateLimitService, userRepo)
+	svc := NewCarpoolService(repo, adminService, subscriptionService, accountUsageService, rateLimitService, quotaService, userRepo)
+	// 订阅页分配 / 撤销拼车分组订阅时立即同步车位
+	subscriptionService.OnSubscriptionChange(svc.OnSubscriptionChange)
 	svc.Start()
 	return svc
 }

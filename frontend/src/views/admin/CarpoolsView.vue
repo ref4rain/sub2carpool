@@ -58,6 +58,15 @@
           <template #members-toolbar>
             <form class="flex gap-2" @submit.prevent="addMember">
               <input v-model="newMemberEmail" type="email" class="input py-1.5 text-sm w-56" :placeholder="t('carpool.members.emailPlaceholder')" />
+              <input
+                v-model="newMemberShare"
+                type="number"
+                min="0"
+                max="100"
+                step="0.01"
+                class="input w-28 py-1.5 text-sm"
+                :placeholder="t('carpool.members.sharePlaceholder')"
+              />
               <select v-model="newMemberRole" class="input py-1.5 text-sm w-28">
                 <option value="manager">{{ t('carpool.roles.manager') }}</option>
                 <option value="member">{{ t('carpool.roles.member') }}</option>
@@ -98,10 +107,6 @@
             </select>
           </label>
           <label class="text-sm text-gray-700 dark:text-gray-300">
-            {{ t('carpool.reserveRatio') }} (%)
-            <input v-model.number="createForm.reserve_percent" type="number" min="0" max="99" class="input mt-1" />
-          </label>
-          <label class="text-sm text-gray-700 dark:text-gray-300">
             {{ t('carpool.validityDays') }}
             <input v-model.number="createForm.validity_days" type="number" min="1" class="input mt-1" />
           </label>
@@ -122,8 +127,9 @@
         <p class="rounded-lg bg-primary-50 p-3 text-sm text-primary-700 dark:bg-primary-900/20 dark:text-primary-300">
           <template v-if="createManualWeekly != null">
             {{ t('carpool.estimate.preview', { weekly: createManualWeekly.toFixed(2), perSeat: createPerSeat.toFixed(2) }) }}
+            <br />{{ t('carpool.admin.equalShareHint') }}
           </template>
-          <template v-else>{{ t('carpool.admin.autoQuotaHint') }}</template>
+          <template v-else>{{ t('carpool.admin.autoQuotaHint') }} {{ t('carpool.admin.equalShareHint') }}</template>
         </p>
       </form>
       <template #footer>
@@ -146,7 +152,7 @@ import CarpoolDetailPanel from '@/components/carpool/CarpoolDetailPanel.vue'
 import carpoolsAdminAPI from '@/api/admin/carpools'
 import { list as listAccounts } from '@/api/admin/accounts'
 import {
-  perSeatWeekly,
+  shareWeekly,
   type Carpool,
   type CarpoolDetail,
   type CarpoolMember
@@ -168,13 +174,14 @@ const accounts = ref<AccountListItem[]>([])
 const editForm = reactive({ name: '', seats: 2, validity_days: 30, notes: '' })
 const newMemberEmail = ref('')
 const newMemberRole = ref<'manager' | 'member'>('manager')
+// 留空则按剩余比例均分给空车位
+const newMemberShare = ref<string | number>('')
 
 const showCreate = ref(false)
 const createForm = reactive({
   name: '',
   account_id: 0,
   seats: 3,
-  reserve_percent: 0,
   validity_days: 30,
   manual_weekly: '' as string | number,
   member_emails: '',
@@ -186,9 +193,8 @@ const createManualWeekly = computed(() => {
   const manual = createForm.manual_weekly === '' ? NaN : Number(createForm.manual_weekly)
   return Number.isFinite(manual) && manual > 0 ? manual : null
 })
-const createPerSeat = computed(() =>
-  perSeatWeekly(createManualWeekly.value ?? 0, createForm.reserve_percent / 100, createForm.seats)
-)
+// 初始成员按座位均分比例，预览一个座位能分到的额度
+const createPerSeat = computed(() => shareWeekly(createManualWeekly.value ?? 0, 100 / Math.max(createForm.seats, 1)))
 
 function showErr(err: unknown) {
   appStore.showError(extractApiErrorMessage(err, t('common.error')))
@@ -269,7 +275,6 @@ function submitCreate() {
       account_id: createForm.account_id,
       weekly_quota_usd: createManualWeekly.value ?? undefined,
       seats: createForm.seats,
-      reserve_ratio: createForm.reserve_percent / 100,
       validity_days: createForm.validity_days,
       exclusive_account: createForm.exclusive_account,
       members: emails.map((email) => ({ email, role: 'manager' }))
@@ -312,8 +317,10 @@ function addMember() {
   if (selectedId.value == null) return
   const id = selectedId.value
   return withBusy(async () => {
-    await carpoolsAdminAPI.addMember(id, { email: newMemberEmail.value.trim(), role: newMemberRole.value })
+    const share = newMemberShare.value === '' ? undefined : Number(newMemberShare.value)
+    await carpoolsAdminAPI.addMember(id, { email: newMemberEmail.value.trim(), role: newMemberRole.value, share_percent: share })
     newMemberEmail.value = ''
+    newMemberShare.value = ''
     await refreshAll()
   }, t('carpool.admin.updated'))
 }

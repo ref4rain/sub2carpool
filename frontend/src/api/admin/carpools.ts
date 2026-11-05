@@ -8,6 +8,8 @@ import type {
   CarpoolAccountAction,
   CarpoolDetail,
   CarpoolQuotaRequest,
+  CarpoolResetCardResult,
+  CarpoolResetCards,
   CarpoolRole
 } from '../carpools'
 
@@ -15,6 +17,8 @@ export interface CarpoolMemberRequest {
   user_id?: number
   email?: string
   role?: CarpoolRole
+  /** 不填则按剩余比例均分给空车位 */
+  share_percent?: number
 }
 
 export interface CreateCarpoolRequest {
@@ -23,7 +27,6 @@ export interface CreateCarpoolRequest {
   /** 留空则跟随自动预估 */
   weekly_quota_usd?: number
   seats: number
-  reserve_ratio: number
   validity_days: number
   notes?: string
   exclusive_account: boolean
@@ -86,6 +89,21 @@ export async function accountAction(id: number, action: CarpoolAccountAction, sc
   await apiClient.post(`/admin/carpools/${id}/account/action`, { action, schedulable })
 }
 
+export async function setMemberShare(id: number, userId: number, sharePercent: number): Promise<Carpool> {
+  const { data } = await apiClient.put<Carpool>(`/admin/carpools/${id}/members/${userId}/share`, { share_percent: sharePercent })
+  return data
+}
+
+export async function getResetCards(id: number): Promise<CarpoolResetCards> {
+  const { data } = await apiClient.get<CarpoolResetCards>(`/admin/carpools/${id}/reset-cards`)
+  return data
+}
+
+export async function useResetCard(id: number): Promise<CarpoolResetCardResult> {
+  const { data } = await apiClient.post<CarpoolResetCardResult>(`/admin/carpools/${id}/reset-cards/use`)
+  return data
+}
+
 export const carpoolsAdminAPI = {
   list,
   getDetail,
@@ -97,6 +115,9 @@ export const carpoolsAdminAPI = {
   setMemberRole,
   removeMember,
   renew,
-  accountAction
+  accountAction,
+  setMemberShare,
+  getResetCards,
+  useResetCard
 }
 export default carpoolsAdminAPI

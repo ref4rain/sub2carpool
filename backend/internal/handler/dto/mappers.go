@@ -907,8 +907,20 @@ func userSubscriptionFromServiceBase(sub *service.UserSubscription) UserSubscrip
 		UpdatedAt:          sub.UpdatedAt,
 		RevokedAt:          sub.DeletedAt,
 		User:               UserFromServiceShallow(sub.User),
-		Group:              GroupFromServiceShallow(sub.Group),
+		Group:              GroupFromServiceShallow(groupWithSubscriptionLimits(sub)),
 	}
+}
+
+// groupWithSubscriptionLimits 订阅有周限额覆盖时返回带覆盖值的分组副本，
+// 让「我的订阅」等页面直接显示该订阅实际生效的周限额。
+func groupWithSubscriptionLimits(sub *service.UserSubscription) *service.Group {
+	if sub.Group == nil || sub.WeeklyLimitUSD == nil || *sub.WeeklyLimitUSD < 0 {
+		return sub.Group
+	}
+	g := *sub.Group
+	limit := *sub.WeeklyLimitUSD
+	g.WeeklyLimitUSD = &limit
+	return &g
 }
 
 func BulkAssignResultFromService(r *service.BulkAssignResult) *BulkAssignResult {

@@ -15,11 +15,24 @@ export default {
   seatsUsed: '{used}/{total} 座',
   perSeatWeekly: '每人周额度',
   accountWeekly: '账号周额度',
-  reserveRatio: '预留比例',
-  reserveRatioHint: '从账号周额度里留出一部分不分给成员，用来抵消预估误差',
+  allocated: '已分配',
+  unallocated: '未分配',
   validityDays: '订阅周期（天）',
   notes: '备注',
   readOnlyHint: '你是只读成员，额度与账号操作需由本车管理员执行。',
+  resetCard: {
+    title: '账号重置卡',
+    view: '查看重置卡',
+    use: '使用重置卡',
+    available: '可用重置卡',
+    expiresAt: '{time} 过期',
+    carUsage: '整车 7 天窗口用量',
+    threshold: '达到 {threshold}% 才能使用',
+    locked: '整车 7 天窗口用量达到 {threshold}% 后才能使用重置卡',
+    effect: '使用后账号 7 天窗口立即重置，全车成员的本周用量同时清零。',
+    confirm: '确定使用一张重置卡？账号 7 天窗口会立即重置，全车成员本周用量清零。',
+    used: '已使用重置卡，账号窗口已重置'
+  },
   account: {
     title: 'OpenAI 账号',
     status: '状态',
@@ -58,9 +71,14 @@ export default {
   },
   members: {
     title: '成员用量',
+    bindingHint: '车位与拼车分组订阅绑定：在订阅管理里分配该分组订阅即占一个车位，撤销订阅即释放车位。',
+    share: '额度比例',
+    shareSaved: '车位比例已更新',
+    shareInvalid: '比例需在 0–100 之间',
+    sharePlaceholder: '比例 %（可空）',
     user: '用户',
     role: '角色',
-    weekly: '本周已用 / 额度',
+    weekly: '本周已用 / 车位额度',
     daily: '今日',
     cost7d: '近 7 天',
     requests7d: '请求数',
@@ -95,6 +113,7 @@ export default {
     groupId: '专属分组 #{id}',
     groupHint: '周限额由拼车自动维护，模型定价等其他设置可在分组管理中调整',
     openGroups: '前往分组管理',
+    equalShareHint: '初始成员按座位数均分额度，建车后可在成员列表逐个调整比例。',
     autoQuotaHint: '不填额度时，按账号 7 天窗口的实际消耗自动预估周额度并均分；首个预估生成前成员暂不限额。'
   }
 }

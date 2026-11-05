@@ -150,6 +150,9 @@ func RegisterUserRoutes(
 				carpools.GET("/:id", h.Carpool.GetDetail)
 				carpools.PUT("/:id/quota", h.Carpool.UpdateQuota)
 				carpools.POST("/:id/account/action", h.Carpool.AccountAction)
+				carpools.PUT("/:id/members/:user_id/share", h.Carpool.SetMemberShare)
+				carpools.GET("/:id/reset-cards", h.Carpool.GetResetCards)
+				carpools.POST("/:id/reset-cards/use", h.Carpool.UseResetCard)
 			}
 		}
 

@@ -57,6 +57,27 @@ type SubscriptionService struct {
 
 	maintenanceQueue *SubscriptionMaintenanceQueue
 	now              func() time.Time
+
+	// changeHooks 订阅分配 / 撤销 / 恢复后异步通知（拼车据此同步车位）
+	changeHooks []func(groupID int64)
+}
+
+// OnSubscriptionChange 注册订阅变更回调；回调在独立 goroutine 中执行，不阻塞调用方。
+func (s *SubscriptionService) OnSubscriptionChange(hook func(groupID int64)) {
+	if hook != nil {
+		s.changeHooks = append(s.changeHooks, hook)
+	}
+}
+
+func (s *SubscriptionService) notifySubscriptionChange(groupID int64) {
+	for _, hook := range s.changeHooks {
+		go hook(groupID)
+	}
+}
+
+// InvalidateSubscriptionCaches 失效订阅的 L1 / 计费缓存，供直接改写订阅行的调用方使用。
+func (s *SubscriptionService) InvalidateSubscriptionCaches(userID, groupID int64) error {
+	return s.invalidateSubscriptionCaches(userID, groupID)
 }
 
 // NewSubscriptionService 创建订阅服务
@@ -277,6 +298,7 @@ func (s *SubscriptionService) maybeInvalidateAssignmentCaches(userID, groupID in
 		return
 	}
 
+	s.notifySubscriptionChange(groupID)
 	s.InvalidateSubCache(userID, groupID)
 	if s.billingCacheService != nil {
 		go func() {
@@ -607,6 +629,7 @@ func (s *SubscriptionService) RevokeSubscription(ctx context.Context, subscripti
 	if err := s.userSubRepo.Delete(ctx, subscriptionID); err != nil {
 		return err
 	}
+	s.notifySubscriptionChange(sub.GroupID)
 
 	if err := s.invalidateSubscriptionCaches(sub.UserID, sub.GroupID); err != nil {
 		return err
@@ -643,6 +666,7 @@ func (s *SubscriptionService) RestoreSubscription(ctx context.Context, subscript
 	if err != nil {
 		return nil, err
 	}
+	s.notifySubscriptionChange(restored.GroupID)
 
 	if err := s.invalidateSubscriptionCaches(restored.UserID, restored.GroupID); err != nil {
 		return nil, err
@@ -1171,8 +1195,8 @@ func (s *SubscriptionService) calculateProgress(sub *UserSubscription, group *Gr
 	}
 
 	// 周进度
-	if group.HasWeeklyLimit() && sub.WeeklyWindowStart != nil {
-		limit := *group.WeeklyLimitUSD
+	if weeklyLimit := sub.EffectiveWeeklyLimit(group); weeklyLimit != nil && sub.WeeklyWindowStart != nil {
+		limit := *weeklyLimit
 		resetsAt := sub.WeeklyWindowStart.Add(7 * 24 * time.Hour)
 		if weeklyResetTime := sub.WeeklyResetTime(); weeklyResetTime != nil {
 			resetsAt = *weeklyResetTime

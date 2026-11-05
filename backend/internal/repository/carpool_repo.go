@@ -19,10 +19,11 @@ func NewCarpoolRepository(db *sql.DB) service.CarpoolRepository {
 
 const carpoolSelectColumns = `
 	c.id, c.name, c.account_id, c.group_id,
-	c.weekly_quota_usd, c.quota_source, c.seats, c.reserve_ratio, c.validity_days, c.notes, c.status,
+	c.weekly_quota_usd, c.quota_source, c.seats, c.validity_days, c.notes, c.status,
 	c.created_by, c.created_at, c.updated_at,
 	c.estimated_weekly_usd, c.window_reset_at, c.baseline_at, c.baseline_used_percent,
-	(SELECT COUNT(*) FROM carpool_members m WHERE m.carpool_id = c.id) AS member_count`
+	(SELECT COUNT(*) FROM carpool_members m WHERE m.carpool_id = c.id) AS member_count,
+	(SELECT COALESCE(SUM(m.share_percent), 0) FROM carpool_members m WHERE m.carpool_id = c.id) AS allocated_percent`
 
 func scanCarpool(row rowScanner) (*service.Carpool, error) {
 	var (
@@ -33,9 +34,9 @@ func scanCarpool(row rowScanner) (*service.Carpool, error) {
 	)
 	if err := row.Scan(
 		&c.ID, &c.Name, &c.AccountID, &c.GroupID,
-		&c.WeeklyQuotaUSD, &c.QuotaSource, &c.Seats, &c.ReserveRatio, &c.ValidityDays, &c.Notes, &c.Status,
+		&c.WeeklyQuotaUSD, &c.QuotaSource, &c.Seats, &c.ValidityDays, &c.Notes, &c.Status,
 		&createdBy, &c.CreatedAt, &c.UpdatedAt,
-		&c.EstimatedWeeklyUSD, &windowResetAt, &baselineAt, &c.BaselineUsedPercent, &c.MemberCount,
+		&c.EstimatedWeeklyUSD, &windowResetAt, &baselineAt, &c.BaselineUsedPercent, &c.MemberCount, &c.AllocatedPercent,
 	); err != nil {
 		return nil, err
 	}
@@ -84,11 +85,11 @@ func (r *carpoolRepository) getOne(ctx context.Context, where string, arg any) (
 func (r *carpoolRepository) Create(ctx context.Context, c *service.Carpool) error {
 	return r.db.QueryRowContext(ctx, `
 		INSERT INTO carpools (name, account_id, group_id,
-			weekly_quota_usd, quota_source, seats, reserve_ratio, validity_days, notes, status, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			weekly_quota_usd, quota_source, seats, validity_days, notes, status, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id, created_at, updated_at`,
 		c.Name, c.AccountID, c.GroupID,
-		c.WeeklyQuotaUSD, c.QuotaSource, c.Seats, c.ReserveRatio, c.ValidityDays, c.Notes, c.Status, c.CreatedBy,
+		c.WeeklyQuotaUSD, c.QuotaSource, c.Seats, c.ValidityDays, c.Notes, c.Status, c.CreatedBy,
 	).Scan(&c.ID, &c.CreatedAt, &c.UpdatedAt)
 }
 
@@ -109,18 +110,21 @@ func (r *carpoolRepository) ListByUser(ctx context.Context, userID int64) ([]ser
 	return r.queryCarpools(ctx, `
 		SELECT `+carpoolSelectColumns+` FROM carpools c
 		WHERE c.deleted_at IS NULL
-		  AND EXISTS (SELECT 1 FROM carpool_members m WHERE m.carpool_id = c.id AND m.user_id = $1)
+		  AND (EXISTS (SELECT 1 FROM carpool_members m WHERE m.carpool_id = c.id AND m.user_id = $1)
+		       -- 订阅页刚分配、还没同步成车位的拼车分组订阅
+		       OR EXISTS (SELECT 1 FROM user_subscriptions s
+		                  WHERE s.group_id = c.group_id AND s.user_id = $1 AND s.deleted_at IS NULL))
 		ORDER BY c.id DESC`, userID)
 }
 
 func (r *carpoolRepository) Update(ctx context.Context, c *service.Carpool) error {
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE carpools SET name = $2,
-			weekly_quota_usd = $3, quota_source = $4, seats = $5, reserve_ratio = $6, validity_days = $7,
-			notes = $8, status = $9, updated_at = NOW()
+			weekly_quota_usd = $3, quota_source = $4, seats = $5, validity_days = $6,
+			notes = $7, status = $8, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL`,
 		c.ID, c.Name,
-		c.WeeklyQuotaUSD, c.QuotaSource, c.Seats, c.ReserveRatio, c.ValidityDays, c.Notes, c.Status)
+		c.WeeklyQuotaUSD, c.QuotaSource, c.Seats, c.ValidityDays, c.Notes, c.Status)
 	if err != nil {
 		return err
 	}
@@ -163,7 +167,7 @@ func (r *carpoolRepository) SoftDelete(ctx context.Context, id int64) error {
 }
 
 const carpoolMemberSelect = `
-	SELECT m.id, m.carpool_id, m.user_id, m.subscription_id, m.role, m.created_at,
+	SELECT m.id, m.carpool_id, m.user_id, m.subscription_id, m.role, m.share_percent, m.created_at,
 		COALESCE(u.email, ''), COALESCE(u.username, '')
 	FROM carpool_members m
 	LEFT JOIN users u ON u.id = m.user_id`
@@ -173,7 +177,7 @@ func scanCarpoolMember(row rowScanner) (*service.CarpoolMember, error) {
 		m     service.CarpoolMember
 		subID sql.NullInt64
 	)
-	if err := row.Scan(&m.ID, &m.CarpoolID, &m.UserID, &subID, &m.Role, &m.CreatedAt, &m.Email, &m.Username); err != nil {
+	if err := row.Scan(&m.ID, &m.CarpoolID, &m.UserID, &subID, &m.Role, &m.SharePercent, &m.CreatedAt, &m.Email, &m.Username); err != nil {
 		return nil, err
 	}
 	if subID.Valid {
@@ -211,10 +215,10 @@ func (r *carpoolRepository) GetMember(ctx context.Context, carpoolID, userID int
 
 func (r *carpoolRepository) AddMember(ctx context.Context, m *service.CarpoolMember) error {
 	err := r.db.QueryRowContext(ctx, `
-		INSERT INTO carpool_members (carpool_id, user_id, subscription_id, role)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO carpool_members (carpool_id, user_id, subscription_id, role, share_percent)
+		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id, created_at`,
-		m.CarpoolID, m.UserID, m.SubscriptionID, m.Role,
+		m.CarpoolID, m.UserID, m.SubscriptionID, m.Role, m.SharePercent,
 	).Scan(&m.ID, &m.CreatedAt)
 	if isUniqueConstraintViolation(err) {
 		return service.ErrCarpoolMemberExists
@@ -229,6 +233,64 @@ func (r *carpoolRepository) UpdateMemberRole(ctx context.Context, carpoolID, use
 		return err
 	}
 	return requireAffected(res, service.ErrCarpoolMemberNotFound)
+}
+
+func (r *carpoolRepository) UpdateMemberShare(ctx context.Context, carpoolID, userID int64, sharePercent float64) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE carpool_members SET share_percent = $3 WHERE carpool_id = $1 AND user_id = $2`, carpoolID, userID, sharePercent)
+	if err != nil {
+		return err
+	}
+	return requireAffected(res, service.ErrCarpoolMemberNotFound)
+}
+
+func (r *carpoolRepository) ListLiveGroupSubscriptions(ctx context.Context, groupID int64) (map[int64]int64, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT user_id, id FROM user_subscriptions WHERE group_id = $1 AND deleted_at IS NULL`, groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[int64]int64)
+	for rows.Next() {
+		var userID, subID int64
+		if err := rows.Scan(&userID, &subID); err != nil {
+			return nil, err
+		}
+		out[userID] = subID
+	}
+	return out, rows.Err()
+}
+
+func (r *carpoolRepository) SetSubscriptionWeeklyLimit(ctx context.Context, subscriptionID int64, limit *float64) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE user_subscriptions SET weekly_limit_usd = $2::numeric, updated_at = NOW()
+		WHERE id = $1 AND weekly_limit_usd IS DISTINCT FROM $2::numeric`, subscriptionID, limit)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// AlignSubscriptionWeeklyWindow 窗口起点早于账号窗口起点（再留 1 小时余量）的订阅属于上一个账号窗口，
+// 对齐时清零周用量；晚于账号窗口起点的（窗口内新加入、首次使用才开窗）只挪起点不清零。
+func (r *carpoolRepository) AlignSubscriptionWeeklyWindow(ctx context.Context, subscriptionID int64, start time.Time) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE user_subscriptions SET
+			weekly_usage_usd = CASE
+				WHEN weekly_window_start IS NULL OR weekly_window_start < $2::timestamptz - interval '1 hour' THEN 0
+				ELSE weekly_usage_usd END,
+			weekly_window_start = $2::timestamptz,
+			updated_at = NOW()
+		WHERE id = $1
+		  AND (weekly_window_start IS NULL
+		       OR abs(extract(epoch FROM weekly_window_start - $2::timestamptz)) > 3600)`, subscriptionID, start)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 func (r *carpoolRepository) SetMemberSubscription(ctx context.Context, carpoolID, userID, subscriptionID int64) error {

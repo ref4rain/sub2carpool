@@ -24,12 +24,12 @@
             <div class="font-medium text-gray-900 dark:text-white">{{ quotaText(carpool.weekly_quota_usd) }}</div>
           </div>
           <div>
-            <div class="text-xs text-gray-500 dark:text-dark-400">{{ t('carpool.reserveRatio') }}</div>
-            <div class="font-medium text-gray-900 dark:text-white">{{ pct(carpool.reserve_ratio * 100) }}</div>
+            <div class="text-xs text-gray-500 dark:text-dark-400">{{ t('carpool.allocated') }}</div>
+            <div class="font-medium text-gray-900 dark:text-white">{{ pct(carpool.allocated_percent) }}</div>
           </div>
           <div>
-            <div class="text-xs text-gray-500 dark:text-dark-400">{{ t('carpool.perSeatWeekly') }}</div>
-            <div class="font-semibold text-primary-600 dark:text-primary-400">{{ quotaText(carpool.per_seat_weekly_usd) }}</div>
+            <div class="text-xs text-gray-500 dark:text-dark-400">{{ t('carpool.unallocated') }}</div>
+            <div class="font-semibold text-primary-600 dark:text-primary-400">{{ pct(carpool.unallocated_percent) }}</div>
           </div>
         </div>
       </div>
@@ -63,27 +63,40 @@
           </div>
           <p v-else class="text-xs text-gray-500 dark:text-dark-400">{{ t('carpool.account.noUsage') }}</p>
 
-          <div v-if="canManage" class="mt-4 flex flex-wrap gap-2">
-            <button class="btn btn-secondary btn-sm" :disabled="busy" @click="runAction('refresh_usage')">
+          <div class="mt-4 flex flex-wrap gap-2">
+            <button v-if="canManage" class="btn btn-secondary btn-sm" :disabled="busy" @click="runAction('refresh_usage')">
               <Icon name="refresh" size="sm" class="mr-1" />{{ t('carpool.account.refreshUsage') }}
             </button>
-            <button v-if="account.schedulable" class="btn btn-secondary btn-sm" :disabled="busy" @click="runAction('set_schedulable', false)">
-              {{ t('carpool.account.pause') }}
-            </button>
-            <button v-else class="btn btn-primary btn-sm" :disabled="busy" @click="runAction('set_schedulable', true)">
-              {{ t('carpool.account.resume') }}
-            </button>
-            <button v-if="account.error_message || account.status === 'error'" class="btn btn-secondary btn-sm" :disabled="busy" @click="runAction('clear_error')">
-              {{ t('carpool.account.clearError') }}
-            </button>
-            <button v-if="isFuture(account.rate_limit_reset_at)" class="btn btn-secondary btn-sm" :disabled="busy" @click="runAction('clear_rate_limit')">
-              {{ t('carpool.account.clearRateLimit') }}
-            </button>
+            <template v-if="account.reset_card_supported">
+              <button class="btn btn-secondary btn-sm" :disabled="busy" @click="openResetCards">
+                {{ t('carpool.resetCard.view') }}
+              </button>
+              <button
+                v-if="canManage"
+                class="btn btn-primary btn-sm"
+                :disabled="busy || weeklyUsedPercent < resetThreshold"
+                :title="weeklyUsedPercent < resetThreshold ? t('carpool.resetCard.locked', { threshold: resetThreshold }) : ''"
+                @click="confirmUseResetCard"
+              >
+                {{ t('carpool.resetCard.use') }}
+              </button>
+            </template>
+            <template v-if="canManage">
+              <button v-if="account.error_message || account.status === 'error'" class="btn btn-secondary btn-sm" :disabled="busy" @click="runAction('clear_error')">
+                {{ t('carpool.account.clearError') }}
+              </button>
+              <button v-if="isFuture(account.rate_limit_reset_at)" class="btn btn-secondary btn-sm" :disabled="busy" @click="runAction('clear_rate_limit')">
+                {{ t('carpool.account.clearRateLimit') }}
+              </button>
+            </template>
           </div>
+          <p v-if="account.reset_card_supported && canManage && weeklyUsedPercent < resetThreshold" class="mt-2 text-[11px] text-gray-400">
+            {{ t('carpool.resetCard.locked', { threshold: resetThreshold }) }}
+          </p>
         </template>
       </div>
 
-      <!-- 周额度推测 -->
+      <!-- 周额度预估 -->
       <div class="card p-5">
         <div class="mb-4 flex items-center justify-between">
           <h3 class="font-semibold text-gray-900 dark:text-white">{{ t('carpool.estimate.title') }}</h3>
@@ -115,10 +128,7 @@
               <div class="font-medium text-gray-900 dark:text-white">{{ t('carpool.estimate.applied') }}</div>
               <div class="text-xs text-gray-400">{{ t(`carpool.quotaSourceHints.${carpool.quota_source}`) }}</div>
             </dt>
-            <dd class="text-right">
-              <div class="font-semibold text-gray-900 dark:text-white">{{ quotaText(estimate.applied_weekly_usd) }}</div>
-              <div class="text-xs text-primary-600 dark:text-primary-400">{{ t('carpool.perSeatWeekly') }} {{ quotaText(estimate.per_seat_weekly_usd) }}</div>
-            </dd>
+            <dd class="text-right font-semibold text-gray-900 dark:text-white">{{ quotaText(estimate.applied_weekly_usd) }}</dd>
           </div>
         </dl>
 
@@ -133,18 +143,10 @@
 
         <form v-if="editing" class="mt-4 space-y-3 rounded-lg bg-gray-50 p-3 dark:bg-dark-700/50" @submit.prevent="saveQuota">
           <label class="block text-xs text-gray-600 dark:text-gray-300">
-            {{ t('carpool.reserveRatio') }} (%)
-            <input v-model.number="form.reserve_percent" type="number" min="0" max="99" step="1" class="input mt-1" />
-            <span class="mt-1 block text-[11px] text-gray-400">{{ t('carpool.reserveRatioHint') }}</span>
-          </label>
-          <label class="block text-xs text-gray-600 dark:text-gray-300">
             {{ t('carpool.estimate.manualWeekly') }}
             <input v-model="form.manual_weekly" type="number" min="0" step="0.01" class="input mt-1" />
             <span class="mt-1 block text-[11px] text-gray-400">{{ t('carpool.estimate.manualWeeklyHint') }}</span>
           </label>
-          <p v-if="manualWeekly != null" class="text-xs text-primary-600 dark:text-primary-400">
-            {{ t('carpool.estimate.preview', { weekly: manualWeekly.toFixed(2), perSeat: previewPerSeat.toFixed(2) }) }}
-          </p>
           <div class="flex justify-end gap-2">
             <button type="button" class="btn btn-secondary btn-sm" @click="editing = false">{{ t('common.cancel') }}</button>
             <button type="submit" class="btn btn-primary btn-sm" :disabled="busy">{{ t('carpool.estimate.save') }}</button>
@@ -156,7 +158,10 @@
     <!-- 成员 -->
     <div class="card overflow-hidden">
       <div class="flex items-center justify-between border-b border-gray-100 p-4 dark:border-dark-700">
-        <h3 class="font-semibold text-gray-900 dark:text-white">{{ t('carpool.members.title') }}</h3>
+        <div>
+          <h3 class="font-semibold text-gray-900 dark:text-white">{{ t('carpool.members.title') }}</h3>
+          <p class="mt-0.5 text-xs text-gray-400">{{ t('carpool.members.bindingHint') }}</p>
+        </div>
         <slot name="members-toolbar" />
       </div>
       <div class="overflow-x-auto">
@@ -165,6 +170,7 @@
             <tr>
               <th class="px-4 py-2">{{ t('carpool.members.user') }}</th>
               <th class="px-4 py-2">{{ t('carpool.members.role') }}</th>
+              <th class="px-4 py-2">{{ t('carpool.members.share') }}</th>
               <th class="min-w-[180px] px-4 py-2">{{ t('carpool.members.weekly') }}</th>
               <th class="px-4 py-2">{{ t('carpool.members.daily') }}</th>
               <th class="px-4 py-2">{{ t('carpool.members.cost7d') }}</th>
@@ -185,7 +191,29 @@
               </td>
               <td class="px-4 py-3 text-gray-600 dark:text-gray-300">{{ t(`carpool.roles.${m.role}`) }}</td>
               <td class="px-4 py-3">
-                <UsageBar :percent="m.weekly_limit_usd > 0 ? (m.weekly_usage_usd / m.weekly_limit_usd) * 100 : 0" :hint="`${usd(m.weekly_usage_usd)} / ${quotaText(m.weekly_limit_usd)}`" compact />
+                <form v-if="canManage" class="flex items-center gap-1" @submit.prevent="saveShare(m)">
+                  <input
+                    v-model.number="shareDrafts[m.user_id]"
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.01"
+                    class="input w-20 py-1 text-sm"
+                    :aria-label="t('carpool.members.share')"
+                  />
+                  <span class="text-xs text-gray-400">%</span>
+                  <button v-if="shareDrafts[m.user_id] !== m.share_percent" type="submit" class="btn btn-primary btn-sm" :disabled="busy">
+                    {{ t('common.save') }}
+                  </button>
+                </form>
+                <span v-else class="text-gray-700 dark:text-gray-300">{{ pct(m.share_percent) }}</span>
+              </td>
+              <td class="px-4 py-3">
+                <UsageBar
+                  :percent="m.weekly_limit_usd ? (m.weekly_usage_usd / m.weekly_limit_usd) * 100 : (m.weekly_limit_usd === 0 && m.weekly_usage_usd > 0 ? 100 : 0)"
+                  :hint="`${usd(m.weekly_usage_usd)} / ${m.weekly_limit_usd == null ? t('carpool.estimate.pending') : usd(m.weekly_limit_usd)}`"
+                  compact
+                />
                 <div v-if="m.weekly_resets_at" class="mt-0.5 text-[11px] text-gray-400">{{ t('carpool.account.resetsAt', { time: fmtTime(m.weekly_resets_at) }) }}</div>
               </td>
               <td class="px-4 py-3 text-gray-700 dark:text-gray-300">{{ usd(m.daily_usage_usd) }}</td>
@@ -201,29 +229,72 @@
         </table>
       </div>
     </div>
+
+    <!-- 重置卡 -->
+    <BaseDialog :show="resetDialog" :title="t('carpool.resetCard.title')" width="narrow" @close="resetDialog = false">
+      <div v-if="resetLoading" class="flex justify-center py-6">
+        <div class="h-6 w-6 animate-spin rounded-full border-2 border-primary-500 border-t-transparent"></div>
+      </div>
+      <div v-else-if="resetCards" class="space-y-3 text-sm">
+        <div class="flex items-center justify-between">
+          <span class="text-gray-600 dark:text-gray-300">{{ t('carpool.resetCard.available') }}</span>
+          <span class="text-lg font-semibold text-gray-900 dark:text-white">{{ resetCards.available_count }}</span>
+        </div>
+        <ul v-if="resetCards.credits?.length" class="space-y-1 text-xs text-gray-500 dark:text-dark-400">
+          <li v-for="(credit, i) in resetCards.credits" :key="i">
+            {{ t('carpool.resetCard.expiresAt', { time: credit.expires_at ? fmtTime(credit.expires_at) : '—' }) }}
+          </li>
+        </ul>
+        <UsageBar :label="t('carpool.resetCard.carUsage')" :percent="resetCards.used_percent" :hint="t('carpool.resetCard.threshold', { threshold: resetCards.threshold_percent })" />
+        <p class="text-xs text-gray-500 dark:text-dark-400">{{ t('carpool.resetCard.effect') }}</p>
+      </div>
+      <template #footer>
+        <div class="flex justify-end gap-2">
+          <button type="button" class="btn btn-secondary" @click="resetDialog = false">{{ t('common.cancel') }}</button>
+          <button
+            v-if="canManage && resetCards"
+            type="button"
+            class="btn btn-primary"
+            :disabled="busy || !resetCards.can_use"
+            @click="confirmUseResetCard"
+          >
+            {{ t('carpool.resetCard.use') }}
+          </button>
+        </div>
+      </template>
+    </BaseDialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
+import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import UsageBar from './CarpoolUsageBar.vue'
 import { formatDateTimeToMinute } from '@/utils/format'
 import { extractApiErrorMessage } from '@/utils/apiError'
-import {
-  perSeatWeekly,
-  type Carpool,
-  type CarpoolAccountAction,
-  type CarpoolDetail,
-  type CarpoolQuotaRequest
+import type {
+  Carpool,
+  CarpoolAccountAction,
+  CarpoolDetail,
+  CarpoolMember,
+  CarpoolQuotaRequest,
+  CarpoolResetCardResult,
+  CarpoolResetCards
 } from '@/api/carpools'
 
 export interface CarpoolPanelActions {
   updateQuota: (id: number, req: CarpoolQuotaRequest) => Promise<Carpool>
   accountAction: (id: number, action: CarpoolAccountAction, schedulable?: boolean) => Promise<void>
+  setMemberShare: (id: number, userId: number, sharePercent: number) => Promise<Carpool>
+  getResetCards: (id: number) => Promise<CarpoolResetCards>
+  useResetCard: (id: number) => Promise<CarpoolResetCardResult>
 }
+
+// 与后端 CarpoolResetCardThresholdPercent 一致；查看重置卡后以接口返回为准
+const DEFAULT_RESET_THRESHOLD = 80
 
 const props = defineProps<{
   detail: CarpoolDetail
@@ -243,31 +314,43 @@ const accountHealthy = computed(() => !!account.value && account.value.schedulab
 
 const busy = ref(false)
 const editing = ref(false)
-const form = reactive({
-  reserve_percent: 0,
-  manual_weekly: '' as string | number
-})
+const form = reactive({ manual_weekly: '' as string | number })
+
+// 车位比例草稿，详情刷新后重置
+const shareDrafts = reactive<Record<number, number>>({})
+watch(
+  () => props.detail.members,
+  (members) => {
+    for (const key of Object.keys(shareDrafts)) delete shareDrafts[Number(key)]
+    for (const m of members) shareDrafts[m.user_id] = m.share_percent
+  },
+  { immediate: true }
+)
+
+const resetDialog = ref(false)
+const resetLoading = ref(false)
+const resetCards = ref<CarpoolResetCards | null>(null)
+const resetThreshold = computed(() => resetCards.value?.threshold_percent ?? DEFAULT_RESET_THRESHOLD)
+// 整车用量：优先用重置卡接口的实时值，否则用账号 7 天窗口快照
+const weeklyUsedPercent = computed(() => resetCards.value?.used_percent ?? account.value?.seven_day?.utilization ?? 0)
 
 // 留空表示跟随自动预估
 const manualWeekly = computed(() => {
   const manual = form.manual_weekly === '' ? NaN : Number(form.manual_weekly)
   return Number.isFinite(manual) && manual > 0 ? manual : null
 })
-const previewPerSeat = computed(() =>
-  perSeatWeekly(manualWeekly.value ?? 0, form.reserve_percent / 100, carpool.value.seats)
-)
 
 function usd(v: number | undefined | null): string {
   return `$${(v ?? 0).toFixed(2)}`
 }
 
-// 额度为 0 表示尚未预估，此时分组不限额
+// 额度为 0 表示尚未预估，此时成员暂不限额
 function quotaText(v: number | undefined | null): string {
   return v && v > 0 ? usd(v) : t('carpool.estimate.pending')
 }
 
 function pct(v: number): string {
-  return `${v.toFixed(0)}%`
+  return `${Number(v.toFixed(2))}%`
 }
 
 function fmtTime(v?: string | null): string {
@@ -285,7 +368,6 @@ function resetHint(v: string | null): string {
 function toggleEdit() {
   editing.value = !editing.value
   if (editing.value) {
-    form.reserve_percent = Math.round(carpool.value.reserve_ratio * 100)
     form.manual_weekly = carpool.value.quota_source === 'manual' ? carpool.value.weekly_quota_usd : ''
   }
 }
@@ -303,8 +385,8 @@ async function run(fn: () => Promise<unknown>, successMsg: string) {
   }
 }
 
-function runAction(action: CarpoolAccountAction, schedulable?: boolean) {
-  return run(() => props.actions.accountAction(carpool.value.id, action, schedulable), t('carpool.account.actionDone'))
+function runAction(action: CarpoolAccountAction) {
+  return run(() => props.actions.accountAction(carpool.value.id, action), t('carpool.account.actionDone'))
 }
 
 function followEstimate() {
@@ -312,15 +394,41 @@ function followEstimate() {
 }
 
 function saveQuota() {
-  const req: CarpoolQuotaRequest = { reserve_ratio: form.reserve_percent / 100 }
-  if (manualWeekly.value != null) {
-    req.weekly_quota_usd = manualWeekly.value
-  } else {
-    req.quota_source = 'auto'
-  }
+  const req: CarpoolQuotaRequest = manualWeekly.value != null ? { weekly_quota_usd: manualWeekly.value } : { quota_source: 'auto' }
   return run(async () => {
     await props.actions.updateQuota(carpool.value.id, req)
     editing.value = false
   }, t('carpool.estimate.saved'))
+}
+
+function saveShare(m: CarpoolMember) {
+  const share = Number(shareDrafts[m.user_id])
+  if (!Number.isFinite(share) || share < 0 || share > 100) {
+    appStore.showError(t('carpool.members.shareInvalid'))
+    return
+  }
+  return run(() => props.actions.setMemberShare(carpool.value.id, m.user_id, share), t('carpool.members.shareSaved'))
+}
+
+async function openResetCards() {
+  resetDialog.value = true
+  resetLoading.value = true
+  try {
+    resetCards.value = await props.actions.getResetCards(carpool.value.id)
+  } catch (err) {
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
+    resetDialog.value = false
+  } finally {
+    resetLoading.value = false
+  }
+}
+
+function confirmUseResetCard() {
+  if (!window.confirm(t('carpool.resetCard.confirm'))) return
+  return run(async () => {
+    await props.actions.useResetCard(carpool.value.id)
+    resetDialog.value = false
+    resetCards.value = null
+  }, t('carpool.resetCard.used'))
 }
 </script>

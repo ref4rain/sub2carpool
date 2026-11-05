@@ -18,8 +18,9 @@ export interface Carpool {
   weekly_quota_usd: number
   quota_source: CarpoolQuotaSource
   seats: number
-  reserve_ratio: number
-  per_seat_weekly_usd: number
+  /** 已分配给各车位的百分比合计 */
+  allocated_percent: number
+  unallocated_percent: number
   validity_days: number
   notes: string
   status: string
@@ -41,6 +42,8 @@ export interface CarpoolAccount {
   type: string
   status: string
   schedulable: boolean
+  /** OpenAI OAuth 账号才有重置卡 */
+  reset_card_supported: boolean
   error_message?: string
   rate_limit_reset_at?: string
   temp_unschedulable_until?: string
@@ -60,7 +63,6 @@ export interface CarpoolEstimate {
   window_reset_at?: string
   min_sample_percent: number
   applied_weekly_usd: number
-  per_seat_weekly_usd: number
 }
 
 export interface CarpoolMember {
@@ -70,12 +72,14 @@ export interface CarpoolMember {
   role: CarpoolRole
   is_me: boolean
   joined_at: string
+  /** 该车位可用账号周额度的百分比 */
+  share_percent: number
   subscription_id?: number
   subscription_status?: string
   expires_at?: string
   weekly_usage_usd: number
-  /** 0 表示尚未预估，暂不限额 */
-  weekly_limit_usd: number
+  /** null 表示尚未预估，暂不限额 */
+  weekly_limit_usd: number | null
   weekly_resets_at?: string
   daily_usage_usd: number
   monthly_usage_usd: number
@@ -97,13 +101,31 @@ export interface CarpoolQuotaRequest {
   quota_source?: 'auto'
   /** 手动指定账号周额度 */
   weekly_quota_usd?: number
-  reserve_ratio?: number
 }
 
-/** 与后端 CarpoolPerSeatWeeklyUSD 一致 */
-export function perSeatWeekly(weekly: number, reserveRatio: number, seats: number): number {
-  if (seats <= 0 || weekly <= 0) return 0
-  return Math.round(((weekly * (1 - reserveRatio)) / seats) * 10000) / 10000
+export interface CarpoolResetCredit {
+  expires_at?: string
+}
+
+/** 账号重置卡；整车（账号 7 天窗口）用量达到阈值后 manager 才能使用 */
+export interface CarpoolResetCards {
+  supported: boolean
+  available_count: number
+  credits?: CarpoolResetCredit[]
+  used_percent: number
+  threshold_percent: number
+  can_use: boolean
+}
+
+export interface CarpoolResetCardResult {
+  result: { code: string; windows_reset: number }
+  warning_code?: string
+}
+
+/** 与后端 CarpoolShareWeeklyUSD 一致：账号周额度 × 车位百分比 */
+export function shareWeekly(weekly: number, sharePercent: number): number {
+  if (weekly <= 0 || sharePercent <= 0) return 0
+  return Math.round(((weekly * sharePercent) / 100) * 10000) / 10000
 }
 
 export async function listMine(): Promise<Carpool[]> {
@@ -125,5 +147,20 @@ export async function accountAction(id: number, action: CarpoolAccountAction, sc
   await apiClient.post(`/carpools/${id}/account/action`, { action, schedulable })
 }
 
-export const carpoolsAPI = { listMine, getDetail, updateQuota, accountAction }
+export async function setMemberShare(id: number, userId: number, sharePercent: number): Promise<Carpool> {
+  const { data } = await apiClient.put<Carpool>(`/carpools/${id}/members/${userId}/share`, { share_percent: sharePercent })
+  return data
+}
+
+export async function getResetCards(id: number): Promise<CarpoolResetCards> {
+  const { data } = await apiClient.get<CarpoolResetCards>(`/carpools/${id}/reset-cards`)
+  return data
+}
+
+export async function useResetCard(id: number): Promise<CarpoolResetCardResult> {
+  const { data } = await apiClient.post<CarpoolResetCardResult>(`/carpools/${id}/reset-cards/use`)
+  return data
+}
+
+export const carpoolsAPI = { listMine, getDetail, updateQuota, accountAction, setMemberShare, getResetCards, useResetCard }
 export default carpoolsAPI

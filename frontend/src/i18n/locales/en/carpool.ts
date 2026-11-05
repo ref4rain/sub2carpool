@@ -15,11 +15,24 @@ export default {
   seatsUsed: '{used}/{total} seats',
   perSeatWeekly: 'Weekly quota per seat',
   accountWeekly: 'Account weekly quota',
-  reserveRatio: 'Reserve ratio',
-  reserveRatioHint: 'Part of the account quota kept back from members to absorb estimate error',
+  allocated: 'Allocated',
+  unallocated: 'Unallocated',
   validityDays: 'Subscription period (days)',
   notes: 'Notes',
   readOnlyHint: 'You are a read-only member. Quota and account actions require a carpool manager.',
+  resetCard: {
+    title: 'Account reset cards',
+    view: 'View reset cards',
+    use: 'Use reset card',
+    available: 'Available reset cards',
+    expiresAt: 'Expires {time}',
+    carUsage: 'Carpool 7-day window usage',
+    threshold: 'Usable at {threshold}%',
+    locked: 'Reset cards unlock once the carpool has used {threshold}% of the 7-day window',
+    effect: 'Using one resets the account 7-day window immediately and clears every member\'s weekly usage.',
+    confirm: 'Use a reset card? The account 7-day window resets now and every member\'s weekly usage is cleared.',
+    used: 'Reset card used; the account window has been reset'
+  },
   account: {
     title: 'OpenAI account',
     status: 'Status',
@@ -58,9 +71,14 @@ export default {
   },
   members: {
     title: 'Member usage',
+    bindingHint: 'Seats follow carpool-group subscriptions: assigning one in Subscriptions takes a seat, revoking it frees the seat.',
+    share: 'Quota share',
+    shareSaved: 'Seat share updated',
+    shareInvalid: 'Share must be between 0 and 100',
+    sharePlaceholder: 'Share % (optional)',
     user: 'User',
     role: 'Role',
-    weekly: 'This week / quota',
+    weekly: 'This week / seat quota',
     daily: 'Today',
     cost7d: 'Last 7 days',
     requests7d: 'Requests',
@@ -95,6 +113,7 @@ export default {
     groupId: 'Group #{id}',
     groupHint: 'The weekly limit is maintained by the carpool; model pricing and other settings can be changed in Groups',
     openGroups: 'Open Groups',
+    equalShareHint: 'Initial members split the quota evenly by seats; adjust each share in the member list afterwards.',
     autoQuotaHint: 'Leave the quota empty to estimate it from the account\'s actual 7-day window consumption and split it evenly. Members are unlimited until the first estimate.'
   }
 }

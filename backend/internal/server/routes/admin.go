@@ -922,5 +922,8 @@ func registerCarpoolRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		carpools.DELETE("/:id/members/:user_id", h.Carpool.AdminRemoveMember)
 		carpools.POST("/:id/renew", h.Carpool.AdminRenew)
 		carpools.POST("/:id/account/action", h.Carpool.AdminAccountAction)
+		carpools.PUT("/:id/members/:user_id/share", h.Carpool.AdminSetMemberShare)
+		carpools.GET("/:id/reset-cards", h.Carpool.AdminGetResetCards)
+		carpools.POST("/:id/reset-cards/use", h.Carpool.AdminUseResetCard)
 	}
 }
