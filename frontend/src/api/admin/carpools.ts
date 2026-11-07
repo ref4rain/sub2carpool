@@ -26,6 +26,12 @@ export interface CreateCarpoolRequest {
   account_id: number
   /** 留空则跟随自动预估 */
   weekly_quota_usd?: number
+  /** 接管已有的 OpenAI 订阅分组（保留设置、API Key 与订阅），不填则新建 */
+  group_id?: number
+  /** 自动预估模式下首个预估生成前使用的账号周额度 */
+  initial_weekly_quota_usd?: number
+  /** 账号只服务本站时，把当前 7 天窗口已有用量计入首个预估 */
+  count_current_window?: boolean
   seats: number
   /** 整车预留比例（0-1） */
   reserve_ratio: number

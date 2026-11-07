@@ -117,6 +117,12 @@ export default {
     groupId: 'Group #{id}',
     groupHint: 'The weekly limit is maintained by the carpool; model pricing and other settings can be changed in Groups',
     openGroups: 'Open Groups',
+    adoptGroup: 'Group',
+    newGroup: 'Create a dedicated group',
+    adoptGroupHint: 'Adopting an existing group keeps its settings, members\' API keys and subscriptions; users with subscriptions take seats automatically',
+    initialQuota: 'Initial account weekly quota (USD, optional)',
+    initialQuotaHint: 'Seats are limited by this quota until the first estimate replaces it, instead of being unlimited',
+    countCurrentWindow: 'Account serves this site only: count the current 7-day window usage toward the estimate (faster estimate)',
     equalShareHint: 'Initial members split the quota evenly by seats; adjust each share in the member list afterwards.',
     autoQuotaHint: 'Leave the quota empty to estimate it from the account\'s actual 7-day window consumption and split it evenly. Members are unlimited until the first estimate.'
   }

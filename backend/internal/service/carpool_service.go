@@ -242,7 +242,8 @@ func (s *CarpoolService) refreshEstimate(ctx context.Context, c *Carpool, window
 	if newWindow {
 		resetAt := window.ResetAt
 		state.WindowResetAt = &resetAt
-		if c.WindowResetAt != nil {
+		if c.WindowResetAt != nil || c.countCurrentWindow {
+			// 跟踪中进入新窗口，或建车时声明账号只服务本站：样本从窗口起点算起
 			start := resetAt.Add(-carpoolUpstreamWindow)
 			state.BaselineAt = &start
 			state.BaselineUsedPercent = 0
@@ -261,7 +262,9 @@ func (s *CarpoolService) refreshEstimate(ctx context.Context, c *Carpool, window
 			state.EstimatedWeeklyUSD = estimated
 		}
 	}
-	state.ApplyToQuota = c.QuotaSource == CarpoolQuotaSourceAuto && carpoolQuotaChanged(c.WeeklyQuotaUSD, state.EstimatedWeeklyUSD)
+	// 没有有效预估时保留当前额度（可能是建车时给的初始额度）
+	state.ApplyToQuota = c.QuotaSource == CarpoolQuotaSourceAuto && state.EstimatedWeeklyUSD > 0 &&
+		carpoolQuotaChanged(c.WeeklyQuotaUSD, state.EstimatedWeeklyUSD)
 	if !newWindow && !state.ApplyToQuota && state.EstimatedWeeklyUSD == c.EstimatedWeeklyUSD {
 		return nil
 	}
@@ -343,13 +346,19 @@ type CarpoolMemberInput struct {
 }
 
 type CreateCarpoolInput struct {
-	Name           string
-	AccountID      int64
+	Name      string
+	AccountID int64
+	// GroupID > 0 时接管已有的 OpenAI 订阅分组（保留分组设置、API Key 与订阅），否则新建专属分组
+	GroupID        int64
 	WeeklyQuotaUSD *float64 // 非 nil 表示手动指定账号周额度，否则跟随自动预估
-	Seats          int
-	ReserveRatio   float64 // 整车预留比例（0-1）
-	ValidityDays   int
-	Notes          string
+	// InitialWeeklyQuotaUSD 自动预估模式下首个预估生成前使用的账号周额度；nil 表示期间不限额
+	InitialWeeklyQuotaUSD *float64
+	// CountCurrentWindow 账号只服务本站时，把当前 7 天窗口已有用量计入首个预估样本
+	CountCurrentWindow bool
+	Seats              int
+	ReserveRatio       float64 // 整车预留比例（0-1）
+	ValidityDays       int
+	Notes              string
 	// ExclusiveAccount 为 true 时账号只保留拼车分组，避免车外流量吃掉额度
 	ExclusiveAccount bool
 	Members          []CarpoolMemberInput
@@ -529,6 +538,11 @@ func (s *CarpoolService) AdminCreate(ctx context.Context, input *CreateCarpoolIn
 		}
 		weekly = roundCarpoolUSD(*input.WeeklyQuotaUSD)
 		source = CarpoolQuotaSourceManual
+	} else if input.InitialWeeklyQuotaUSD != nil {
+		if *input.InitialWeeklyQuotaUSD <= 0 {
+			return nil, ErrCarpoolInvalidQuota
+		}
+		weekly = roundCarpoolUSD(*input.InitialWeeklyQuotaUSD)
 	}
 	validityDays := input.ValidityDays
 	if validityDays <= 0 {
@@ -546,6 +560,26 @@ func (s *CarpoolService) AdminCreate(ctx context.Context, input *CreateCarpoolIn
 		return nil, ErrCarpoolAccountTaken
 	} else if err != nil && !errors.Is(err, ErrCarpoolNotFound) {
 		return nil, err
+	}
+
+	var adopted *Group
+	if input.GroupID > 0 {
+		adopted, err = s.adminService.GetGroup(ctx, input.GroupID)
+		if err != nil {
+			return nil, err
+		}
+		if adopted.Platform != domain.PlatformOpenAI || !adopted.IsSubscriptionType() || adopted.Status != domain.StatusActive {
+			return nil, ErrCarpoolGroupInvalid
+		}
+		existing, err := s.repo.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range existing {
+			if c.GroupID == adopted.ID {
+				return nil, ErrCarpoolGroupTaken
+			}
+		}
 	}
 
 	// 先解析成员，避免建完分组才发现用户不存在
@@ -572,20 +606,25 @@ func (s *CarpoolService) AdminCreate(ctx context.Context, input *CreateCarpoolIn
 		Notes:          strings.TrimSpace(input.Notes),
 		Status:         domain.StatusActive,
 		CreatedBy:      &actor,
+
+		countCurrentWindow: input.CountCurrentWindow,
 	}
-	limit := carpoolGroupWeeklyLimit(carpool)
-	group, err := s.adminService.CreateGroup(ctx, &CreateGroupInput{
-		Name:                      "拼车-" + name,
-		Description:               "拼车专属分组。周限额由拼车自动维护，模型定价等其他设置可在此调整",
-		Platform:                  domain.PlatformOpenAI,
-		RateMultiplier:            1.0,
-		IsExclusive:               true,
-		SubscriptionType:          domain.SubscriptionTypeSubscription,
-		WeeklyLimitUSD:            &limit,
-		LongContextPricingEnabled: true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create carpool group: %w", err)
+	group := adopted
+	if group == nil {
+		limit := carpoolGroupWeeklyLimit(carpool)
+		group, err = s.adminService.CreateGroup(ctx, &CreateGroupInput{
+			Name:                      "拼车-" + name,
+			Description:               "拼车专属分组。周限额由拼车自动维护，模型定价等其他设置可在此调整",
+			Platform:                  domain.PlatformOpenAI,
+			RateMultiplier:            1.0,
+			IsExclusive:               true,
+			SubscriptionType:          domain.SubscriptionTypeSubscription,
+			WeeklyLimitUSD:            &limit,
+			LongContextPricingEnabled: true,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create carpool group: %w", err)
+		}
 	}
 	carpool.GroupID = group.ID
 
@@ -597,7 +636,9 @@ func (s *CarpoolService) AdminCreate(ctx context.Context, input *CreateCarpoolIn
 		GroupIDs:              &groupIDs,
 		SkipMixedChannelCheck: true,
 	}); err != nil {
-		_ = s.adminService.DeleteGroup(ctx, group.ID)
+		if adopted == nil {
+			_ = s.adminService.DeleteGroup(ctx, group.ID)
+		}
 		return nil, fmt.Errorf("bind account to carpool group: %w", err)
 	}
 

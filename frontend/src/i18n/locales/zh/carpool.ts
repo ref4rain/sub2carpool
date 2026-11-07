@@ -117,6 +117,12 @@ export default {
     groupId: '专属分组 #{id}',
     groupHint: '周限额由拼车自动维护，模型定价等其他设置可在分组管理中调整',
     openGroups: '前往分组管理',
+    adoptGroup: '使用分组',
+    newGroup: '新建专属分组',
+    adoptGroupHint: '选择已有分组时直接接管：分组设置、成员的 API Key 和订阅都保留，已有订阅的用户自动占车位',
+    initialQuota: '初始账号周额度（USD，可空）',
+    initialQuotaHint: '自动预估生成前先按这个额度给各车位分配，避免期间不限额；预估出来后自动替换',
+    countCurrentWindow: '账号只给本站用：把当前 7 天窗口已有用量计入预估（更快出预估）',
     equalShareHint: '初始成员按座位数均分额度，建车后可在成员列表逐个调整比例。',
     autoQuotaHint: '不填额度时，按账号 7 天窗口的实际消耗自动预估周额度并均分；首个预估生成前成员暂不限额。'
   }

@@ -37,6 +37,8 @@ var (
 	ErrCarpoolNotFound         = infraerrors.NotFound("CARPOOL_NOT_FOUND", "carpool not found")
 	ErrCarpoolForbidden        = infraerrors.Forbidden("CARPOOL_FORBIDDEN", "only carpool managers can do this")
 	ErrCarpoolAccountTaken     = infraerrors.Conflict("CARPOOL_ACCOUNT_TAKEN", "account already belongs to another carpool")
+	ErrCarpoolGroupTaken       = infraerrors.Conflict("CARPOOL_GROUP_TAKEN", "group already belongs to another carpool")
+	ErrCarpoolGroupInvalid     = infraerrors.BadRequest("CARPOOL_GROUP_INVALID", "carpool can only adopt an active openai subscription group")
 	ErrCarpoolAccountPlatform  = infraerrors.BadRequest("CARPOOL_ACCOUNT_PLATFORM", "carpool only supports openai accounts")
 	ErrCarpoolInvalidSeats     = infraerrors.BadRequest("CARPOOL_INVALID_SEATS", "seats must be between 1 and 10")
 	ErrCarpoolSeatsFull        = infraerrors.BadRequest("CARPOOL_SEATS_FULL", "carpool has no free seat")
@@ -76,6 +78,9 @@ type Carpool struct {
 
 	MemberCount      int
 	AllocatedPercent float64 // 已分配给各车位的百分比合计
+
+	// countCurrentWindow 仅建车时生效：账号只服务本站时，把当前窗口已有用量也算进首个预估样本
+	countCurrentWindow bool
 }
 
 // DistributableWeeklyUSD 可分给车位的周额度 = 账号周额度 × (1 - 整车预留)。

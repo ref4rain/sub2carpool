@@ -100,6 +100,14 @@
               <option v-for="a in accounts" :key="a.id" :value="a.id">#{{ a.id }} {{ a.name }}</option>
             </select>
           </label>
+          <label class="text-sm text-gray-700 dark:text-gray-300 sm:col-span-2">
+            {{ t('carpool.admin.adoptGroup') }}
+            <select v-model.number="createForm.group_id" class="input mt-1">
+              <option :value="0">{{ t('carpool.admin.newGroup') }}</option>
+              <option v-for="g in adoptableGroups" :key="g.id" :value="g.id">#{{ g.id }} {{ g.name }}</option>
+            </select>
+            <span class="mt-1 block text-xs text-gray-400">{{ t('carpool.admin.adoptGroupHint') }}</span>
+          </label>
           <label class="text-sm text-gray-700 dark:text-gray-300">
             {{ t('carpool.seats') }}
             <select v-model.number="createForm.seats" class="input mt-1">
@@ -119,6 +127,15 @@
           {{ t('carpool.estimate.manualWeekly') }}
           <input v-model="createForm.manual_weekly" type="number" min="0" step="0.01" class="input mt-1" />
           <span class="mt-1 block text-xs text-gray-400">{{ t('carpool.estimate.manualWeeklyHint') }}</span>
+        </label>
+        <label v-if="createManualWeekly == null" class="block text-sm text-gray-700 dark:text-gray-300">
+          {{ t('carpool.admin.initialQuota') }}
+          <input v-model="createForm.initial_weekly" type="number" min="0" step="0.01" class="input mt-1" />
+          <span class="mt-1 block text-xs text-gray-400">{{ t('carpool.admin.initialQuotaHint') }}</span>
+        </label>
+        <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+          <input v-model="createForm.count_current_window" type="checkbox" />
+          {{ t('carpool.admin.countCurrentWindow') }}
         </label>
         <label class="block text-sm text-gray-700 dark:text-gray-300">
           {{ t('carpool.admin.initialMembers') }}
@@ -155,13 +172,14 @@ import Icon from '@/components/icons/Icon.vue'
 import CarpoolDetailPanel from '@/components/carpool/CarpoolDetailPanel.vue'
 import carpoolsAdminAPI from '@/api/admin/carpools'
 import { list as listAccounts } from '@/api/admin/accounts'
+import { getAll as listGroups } from '@/api/admin/groups'
 import {
   shareWeekly,
   type Carpool,
   type CarpoolDetail,
   type CarpoolMember
 } from '@/api/carpools'
-import type { AccountListItem } from '@/types'
+import type { AccountListItem, AdminGroup } from '@/types'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
 
@@ -174,6 +192,13 @@ const carpools = ref<Carpool[]>([])
 const selectedId = ref<number | null>(null)
 const detail = ref<CarpoolDetail | null>(null)
 const accounts = ref<AccountListItem[]>([])
+const groups = ref<AdminGroup[]>([])
+// 可接管的分组：OpenAI 订阅分组，且未被其他拼车使用
+const adoptableGroups = computed(() =>
+  groups.value.filter(
+    (g) => g.subscription_type === 'subscription' && !carpools.value.some((c) => c.group_id === g.id)
+  )
+)
 
 const editForm = reactive({ name: '', seats: 2, validity_days: 30, notes: '' })
 const newMemberEmail = ref('')
@@ -189,6 +214,9 @@ const createForm = reactive({
   reserve_percent: 0,
   validity_days: 30,
   manual_weekly: '' as string | number,
+  initial_weekly: '' as string | number,
+  group_id: 0,
+  count_current_window: false,
   member_emails: '',
   exclusive_account: true
 })
@@ -264,8 +292,12 @@ function select(id: number) {
 async function openCreate() {
   showCreate.value = true
   try {
-    const res = await listAccounts(1, 200, { platform: 'openai', lite: '1' })
+    const [res, allGroups] = await Promise.all([
+      listAccounts(1, 200, { platform: 'openai', lite: '1' }),
+      listGroups('openai')
+    ])
     accounts.value = res.items
+    groups.value = allGroups
   } catch (err) {
     showErr(err)
   }
@@ -281,6 +313,10 @@ function submitCreate() {
       name: createForm.name,
       account_id: createForm.account_id,
       weekly_quota_usd: createManualWeekly.value ?? undefined,
+      group_id: createForm.group_id || undefined,
+      initial_weekly_quota_usd:
+        createManualWeekly.value == null && Number(createForm.initial_weekly) > 0 ? Number(createForm.initial_weekly) : undefined,
+      count_current_window: createForm.count_current_window,
       seats: createForm.seats,
       reserve_ratio: createForm.reserve_percent / 100,
       validity_days: createForm.validity_days,

@@ -56,6 +56,9 @@ type carpoolShareRequest struct {
 type createCarpoolRequest struct {
 	Name             string                 `json:"name" binding:"required"`
 	AccountID        int64                  `json:"account_id" binding:"required"`
+	GroupID          int64                  `json:"group_id"`
+	InitialQuotaUSD  *float64               `json:"initial_weekly_quota_usd"`
+	CountWindow      bool                   `json:"count_current_window"`
 	WeeklyQuotaUSD   *float64               `json:"weekly_quota_usd"`
 	Seats            int                    `json:"seats" binding:"required"`
 	ReserveRatio     float64                `json:"reserve_ratio"`
@@ -221,16 +224,20 @@ func (h *CarpoolHandler) AdminCreate(c *gin.Context) {
 		exclusive = *req.ExclusiveAccount
 	}
 	view, err := h.carpoolService.AdminCreate(c.Request.Context(), &service.CreateCarpoolInput{
-		Name:             req.Name,
-		AccountID:        req.AccountID,
-		WeeklyQuotaUSD:   req.WeeklyQuotaUSD,
-		Seats:            req.Seats,
-		ReserveRatio:     req.ReserveRatio,
-		ValidityDays:     req.ValidityDays,
-		Notes:            req.Notes,
-		ExclusiveAccount: exclusive,
-		Members:          members,
-		ActorID:          actorID,
+		Name:      req.Name,
+		AccountID: req.AccountID,
+		GroupID:   req.GroupID,
+		// 自动预估生成前使用的初始额度
+		InitialWeeklyQuotaUSD: req.InitialQuotaUSD,
+		CountCurrentWindow:    req.CountWindow,
+		WeeklyQuotaUSD:        req.WeeklyQuotaUSD,
+		Seats:                 req.Seats,
+		ReserveRatio:          req.ReserveRatio,
+		ValidityDays:          req.ValidityDays,
+		Notes:                 req.Notes,
+		ExclusiveAccount:      exclusive,
+		Members:               members,
+		ActorID:               actorID,
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)

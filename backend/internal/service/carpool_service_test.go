@@ -693,3 +693,39 @@ func TestResetCards_PermissionsAndSupport(t *testing.T) {
 	admin.account.Type = AccountTypeOAuth
 	require.True(t, carpoolSupportsResetCard(admin.account))
 }
+
+func TestRefreshEstimate_InitialQuotaKeptUntilFirstEstimate(t *testing.T) {
+	svc, repo, admin, _ := newCarpoolTestService()
+	repo.carpools[10].WeeklyQuotaUSD = 2000 // 建车时给的初始额度，来源仍是 auto
+	repo.members[10][0].SharePercent = 25
+	now := time.Now()
+	resetAt := now.Add(5 * 24 * time.Hour)
+	admin.setWindow(2, resetAt)
+
+	c := syncCarpool(t, svc, repo, 10, now)
+	require.InDelta(t, 2000, c.WeeklyQuotaUSD, 1e-9, "没有预估时不能把初始额度清零")
+	require.InDelta(t, 500, *repo.subs[501].limit, 1e-9, "25% × 2000，和接管前分组限额一致")
+
+	admin.setWindow(12, resetAt)
+	repo.accountCost = 300
+	c = syncCarpool(t, svc, repo, 10, now.Add(time.Hour))
+	require.InDelta(t, 3000, c.WeeklyQuotaUSD, 1e-9, "首个预估生成后替换初始额度")
+}
+
+func TestRefreshEstimate_CountCurrentWindowStartsAtWindowStart(t *testing.T) {
+	svc, repo, admin, _ := newCarpoolTestService()
+	now := time.Now()
+	resetAt := now.Add(4 * 24 * time.Hour).Truncate(time.Second)
+	admin.setWindow(30, resetAt)
+	repo.accountCost = 600
+
+	c, err := repo.GetByID(context.Background(), 10)
+	require.NoError(t, err)
+	c.countCurrentWindow = true
+	require.NoError(t, svc.syncLocked(context.Background(), c, now))
+
+	stored := repo.carpools[10]
+	require.Zero(t, stored.BaselineUsedPercent)
+	require.True(t, stored.BaselineAt.Equal(resetAt.Add(-7*24*time.Hour)), "样本从窗口起点算起")
+	require.InDelta(t, 2000, stored.WeeklyQuotaUSD, 1e-9, "立即用本窗口已有用量预估：600 / 30%")
+}

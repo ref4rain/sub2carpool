@@ -246,7 +246,9 @@ func (r *carpoolRepository) UpdateMemberShare(ctx context.Context, carpoolID, us
 
 func (r *carpoolRepository) ListLiveGroupSubscriptions(ctx context.Context, groupID int64) (map[int64]int64, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT user_id, id FROM user_subscriptions WHERE group_id = $1 AND deleted_at IS NULL`, groupID)
+		`SELECT s.user_id, s.id FROM user_subscriptions s
+		 JOIN users u ON u.id = s.user_id AND u.deleted_at IS NULL
+		 WHERE s.group_id = $1 AND s.deleted_at IS NULL`, groupID)
 	if err != nil {
 		return nil, err
 	}
