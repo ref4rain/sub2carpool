@@ -302,10 +302,10 @@ func newCarpoolTestService() (*CarpoolService, *fakeCarpoolRepo, *fakeCarpoolAdm
 		},
 		members: map[int64][]CarpoolMember{
 			10: {
-				{CarpoolID: 10, UserID: 1, Role: CarpoolRoleManager, Email: "alice@example.com", SharePercent: 40, SubscriptionID: i64(501)},
-				{CarpoolID: 10, UserID: 2, Role: CarpoolRoleMember, Email: "bob@example.com", SharePercent: 30, SubscriptionID: i64(502)},
+				{CarpoolID: 10, UserID: 1, Role: CarpoolRoleManager, Email: "alice@example.com", SharePercent: 40, SubscriptionID: carpoolInt64(501)},
+				{CarpoolID: 10, UserID: 2, Role: CarpoolRoleMember, Email: "bob@example.com", SharePercent: 30, SubscriptionID: carpoolInt64(502)},
 			},
-			20: {{CarpoolID: 20, UserID: 3, Role: CarpoolRoleManager, Email: "carol@example.com", SharePercent: 100, SubscriptionID: i64(503)}},
+			20: {{CarpoolID: 20, UserID: 3, Role: CarpoolRoleManager, Email: "carol@example.com", SharePercent: 100, SubscriptionID: carpoolInt64(503)}},
 		},
 		subs: map[int64]*fakeCarpoolSub{
 			501: {userID: 1, groupID: 1000},
@@ -729,3 +729,5 @@ func TestRefreshEstimate_CountCurrentWindowStartsAtWindowStart(t *testing.T) {
 	require.True(t, stored.BaselineAt.Equal(resetAt.Add(-7*24*time.Hour)), "样本从窗口起点算起")
 	require.InDelta(t, 2000, stored.WeeklyQuotaUSD, 1e-9, "立即用本窗口已有用量预估：600 / 30%")
 }
+
+func carpoolInt64(v int64) *int64 { return &v }
