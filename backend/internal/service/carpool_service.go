@@ -466,6 +466,8 @@ type CarpoolResetCards struct {
 	UsedPercent      float64                            `json:"used_percent"`
 	ThresholdPercent float64                            `json:"threshold_percent"`
 	CanUse           bool                               `json:"can_use"`
+	// 仅供服务端指定消费卡片，卡 ID 不进入 API DTO 或账号 extra。
+	candidates []openAIAutoResetCreditCandidate
 }
 
 // CarpoolResetCardResult 使用重置卡的结果。
@@ -961,11 +963,12 @@ func (s *CarpoolService) GetResetCards(ctx context.Context, id, userID int64) (*
 	if err != nil || !cards.Supported {
 		return cards, err
 	}
-	cards.CanUse = canManage && cards.AvailableCount > 0 && cards.UsedPercent >= CarpoolResetCardThresholdPercent
+	_, selectionErr := selectCarpoolResetCredit(cards, time.Now())
+	cards.CanUse = canManage && selectionErr == nil && cards.UsedPercent >= CarpoolResetCardThresholdPercent
 	return cards, nil
 }
 
-// UseResetCard 使用一张账号重置卡：仅 manager，且整车（账号 7 天窗口）已用满 80%。
+// UseResetCard 使用尚未过期且最早到期的一张账号重置卡：仅 manager，且整车（账号 7 天窗口）已用满 80%。
 // 用后立即同步，成员周用量随账号窗口重置清零。
 func (s *CarpoolService) UseResetCard(ctx context.Context, id, userID int64) (*CarpoolResetCardResult, error) {
 	carpool, err := s.loadCarpoolForManager(ctx, id, userID)
@@ -982,7 +985,15 @@ func (s *CarpoolService) UseResetCard(ctx context.Context, id, userID int64) (*C
 	if cards.UsedPercent < CarpoolResetCardThresholdPercent {
 		return nil, ErrCarpoolResetNotAllowed
 	}
-	result, err := s.quotaService.ResetCredit(ctx, account.ID)
+	candidate, err := selectCarpoolResetCredit(cards, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	redeemRequestID, err := generateRedeemRequestID()
+	if err != nil {
+		return nil, fmt.Errorf("generate carpool reset card redeem request id: %w", err)
+	}
+	result, err := s.quotaService.ResetCreditTargeted(ctx, account.ID, candidate.ID, redeemRequestID)
 	if err != nil {
 		return nil, err
 	}
@@ -1015,10 +1026,28 @@ func (s *CarpoolService) queryResetCards(ctx context.Context, carpool *Carpool) 
 		cards.AvailableCount = usage.RateLimitResetCredits.AvailableCount
 		cards.Credits = usage.RateLimitResetCredits.Credits
 	}
+	cards.candidates = usage.autoResetCandidates
 	if used, ok := openAIWeeklyUsedPercent(usage.RateLimit); ok && used > cards.UsedPercent {
 		cards.UsedPercent = used
 	}
 	return cards, account, nil
+}
+
+// selectCarpoolResetCredit 复用上游自动重置的选卡校验和排序，排除查询后已过期的卡。
+// 缺失卡片 ID、到期时间或完整列表时拒绝消费，不回退到由上游任意选卡。
+func selectCarpoolResetCredit(cards *CarpoolResetCards, now time.Time) (openAIAutoResetCreditCandidate, error) {
+	available := cards.AvailableCount
+	if available <= 0 || len(cards.candidates) < available {
+		return selectOpenAIAutoResetCandidate(cards.candidates, available, nil, "")
+	}
+	candidates := make([]openAIAutoResetCreditCandidate, 0, len(cards.candidates))
+	for _, candidate := range cards.candidates {
+		if expiresAt, err := time.Parse(time.RFC3339, candidate.ExpiresAt); err == nil && !expiresAt.After(now) {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	return selectOpenAIAutoResetCandidate(candidates, min(available, len(candidates)), nil, "")
 }
 
 func carpoolSupportsResetCard(account *Account) bool {

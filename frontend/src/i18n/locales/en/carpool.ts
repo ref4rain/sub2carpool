@@ -32,8 +32,8 @@ export default {
     carUsage: 'Carpool 7-day window usage',
     threshold: 'Usable at {threshold}%',
     locked: 'Reset cards unlock once the carpool has used {threshold}% of the 7-day window',
-    effect: 'Using one resets the account 7-day window immediately and clears every member\'s weekly usage.',
-    confirm: 'Use a reset card? The account 7-day window resets now and every member\'s weekly usage is cleared.',
+    effect: 'Uses the unexpired reset card that expires soonest. This resets the account 7-day window immediately and clears every member\'s weekly usage.',
+    confirm: 'Use the unexpired reset card that expires soonest? The account 7-day window resets now and every member\'s weekly usage is cleared.',
     used: 'Reset card used; the account window has been reset'
   },
   account: {
