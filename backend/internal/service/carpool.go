@@ -128,12 +128,13 @@ type CarpoolMember struct {
 
 // CarpoolMemberUsage 成员在拼车分组内的窗口用量（来自 usage_logs）。
 type CarpoolMemberUsage struct {
-	UserID       int64
-	Requests     int64
-	Tokens       int64
-	StandardCost float64
-	ActualCost   float64
-	LastUsedAt   *time.Time
+	UserID          int64
+	Requests        int64
+	Tokens          int64
+	StandardCost    float64
+	ActualCost      float64
+	DailyActualCost float64
+	LastUsedAt      *time.Time
 }
 
 // CarpoolEstimateState 一次预估刷新要写回的状态。
@@ -174,8 +175,9 @@ type CarpoolRepository interface {
 	// 起点早于 start 的订阅属于上一个账号窗口，同时清零周用量。返回是否有变化。
 	AlignSubscriptionWeeklyWindow(ctx context.Context, subscriptionID int64, start time.Time) (bool, error)
 
-	// GetGroupUsageByUser 统计分组内每个用户自 since 起的用量。
-	GetGroupUsageByUser(ctx context.Context, groupID int64, since time.Time) (map[int64]*CarpoolMemberUsage, error)
+	// GetGroupUsageByUser 统计分组内每个用户 [since, now) 的用量，
+	// 日用量按配置时区的当天零点统计，不依赖订阅计数器是否已重置。
+	GetGroupUsageByUser(ctx context.Context, groupID int64, since, now time.Time) (map[int64]*CarpoolMemberUsage, error)
 	// GetAccountActualCostSince 账号自 since 起的 actual_cost 合计，与成员订阅扣费同口径（已含分组模型定价与倍率）。
 	GetAccountActualCostSince(ctx context.Context, accountID int64, since time.Time) (float64, error)
 }

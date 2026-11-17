@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
@@ -314,17 +315,18 @@ func (r *carpoolRepository) RemoveMember(ctx context.Context, carpoolID, userID 
 	return requireAffected(res, service.ErrCarpoolMemberNotFound)
 }
 
-func (r *carpoolRepository) GetGroupUsageByUser(ctx context.Context, groupID int64, since time.Time) (map[int64]*service.CarpoolMemberUsage, error) {
+func (r *carpoolRepository) GetGroupUsageByUser(ctx context.Context, groupID int64, since, now time.Time) (map[int64]*service.CarpoolMemberUsage, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT user_id,
 			COUNT(*),
 			COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0),
 			COALESCE(SUM(total_cost), 0),
 			COALESCE(SUM(actual_cost), 0),
+			COALESCE(SUM(actual_cost) FILTER (WHERE created_at >= $4), 0),
 			MAX(created_at)
 		FROM usage_logs
-		WHERE group_id = $1 AND created_at >= $2
-		GROUP BY user_id`, groupID, since)
+		WHERE group_id = $1 AND created_at >= $2 AND created_at < $3
+		GROUP BY user_id`, groupID, since, now, timezone.StartOfDay(now))
 	if err != nil {
 		return nil, err
 	}
@@ -335,7 +337,7 @@ func (r *carpoolRepository) GetGroupUsageByUser(ctx context.Context, groupID int
 			u    service.CarpoolMemberUsage
 			last sql.NullTime
 		)
-		if err := rows.Scan(&u.UserID, &u.Requests, &u.Tokens, &u.StandardCost, &u.ActualCost, &last); err != nil {
+		if err := rows.Scan(&u.UserID, &u.Requests, &u.Tokens, &u.StandardCost, &u.ActualCost, &u.DailyActualCost, &last); err != nil {
 			return nil, err
 		}
 		if last.Valid {

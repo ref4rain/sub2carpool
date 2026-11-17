@@ -1260,7 +1260,7 @@ func (s *CarpoolService) buildDetail(ctx context.Context, c *Carpool, viewerID i
 	if err != nil {
 		return nil, err
 	}
-	usage, err := s.repo.GetGroupUsageByUser(ctx, c.GroupID, now.Add(-carpoolUpstreamWindow))
+	usage, err := s.repo.GetGroupUsageByUser(ctx, c.GroupID, now.Add(-carpoolUpstreamWindow), now)
 	if err != nil {
 		return nil, err
 	}
@@ -1288,7 +1288,6 @@ func (s *CarpoolService) buildDetail(ctx context.Context, c *Carpool, viewerID i
 				view.ExpiresAt = &expires
 				view.WeeklyUsageUSD = sub.WeeklyUsageUSD
 				view.WeeklyResetsAt = sub.WeeklyResetTime()
-				view.DailyUsageUSD = sub.DailyUsageUSD
 				view.MonthlyUsageUSD = sub.MonthlyUsageUSD
 			}
 		}
@@ -1298,6 +1297,7 @@ func (s *CarpoolService) buildDetail(ctx context.Context, c *Carpool, viewerID i
 			view.WeeklyResetsAt = &resetAt
 		}
 		if u := usage[m.UserID]; u != nil {
+			view.DailyUsageUSD = roundCarpoolUSD(u.DailyActualCost)
 			view.Requests7d = u.Requests
 			view.Tokens7d = u.Tokens
 			view.Cost7dUSD = roundCarpoolUSD(u.ActualCost)

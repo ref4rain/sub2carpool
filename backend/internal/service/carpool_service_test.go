@@ -113,6 +113,7 @@ type fakeCarpoolRepo struct {
 	subs        map[int64]*fakeCarpoolSub
 	accountCost float64
 	costSince   time.Time
+	usage       map[int64]*CarpoolMemberUsage
 	saveAllowed bool
 }
 
@@ -249,7 +250,10 @@ func (r *fakeCarpoolRepo) AlignSubscriptionWeeklyWindow(_ context.Context, subID
 	s.windowStart = &start
 	return true, nil
 }
-func (r *fakeCarpoolRepo) GetGroupUsageByUser(context.Context, int64, time.Time) (map[int64]*CarpoolMemberUsage, error) {
+func (r *fakeCarpoolRepo) GetGroupUsageByUser(context.Context, int64, time.Time, time.Time) (map[int64]*CarpoolMemberUsage, error) {
+	if r.usage != nil {
+		return r.usage, nil
+	}
 	return map[int64]*CarpoolMemberUsage{1: {UserID: 1, Requests: 3, ActualCost: 1.5}}, nil
 }
 func (r *fakeCarpoolRepo) GetAccountActualCostSince(_ context.Context, _ int64, since time.Time) (float64, error) {
@@ -321,6 +325,62 @@ func newCarpoolTestService() (*CarpoolService, *fakeCarpoolRepo, *fakeCarpoolAdm
 	invalidated := &[]int64{}
 	svc.invalidateSub = func(userID, _ int64) { *invalidated = append(*invalidated, userID) }
 	return svc, repo, admin, invalidated
+}
+
+type carpoolDetailSubRepo struct {
+	UserSubscriptionRepository
+	sub *UserSubscription
+}
+
+func (r *carpoolDetailSubRepo) GetByID(_ context.Context, id int64) (*UserSubscription, error) {
+	if r.sub == nil || r.sub.ID != id {
+		return nil, ErrSubscriptionNotFound
+	}
+	cp := *r.sub
+	return &cp, nil
+}
+
+func TestCarpoolDetail_DailyUsageComesFromLogs(t *testing.T) {
+	now := time.Now()
+	yesterday := now.Add(-24 * time.Hour)
+	for _, tc := range []struct {
+		name        string
+		windowStart *time.Time
+		dailyCost   float64
+		noLogs      bool
+	}{
+		{name: "missing daily window with historical counter", dailyCost: 12.34567},
+		{name: "yesterday usage without new requests", windowStart: &yesterday},
+		{name: "current counter differs from calendar day", windowStart: &now, dailyCost: 23.45},
+		{name: "no logs in last seven days", noLogs: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, repo, _, _ := newCarpoolTestService()
+			sub := &UserSubscription{
+				ID: 501, DailyWindowStart: tc.windowStart,
+				DailyUsageUSD: 1439.3420698, WeeklyUsageUSD: 609.8155496,
+			}
+			svc.subscriptionService = &SubscriptionService{userSubRepo: &carpoolDetailSubRepo{sub: sub}}
+			repo.usage = map[int64]*CarpoolMemberUsage{}
+			if !tc.noLogs {
+				repo.usage[1] = &CarpoolMemberUsage{
+					UserID: 1, Requests: 3, ActualCost: 1034.36, DailyActualCost: tc.dailyCost,
+				}
+			}
+			detail, err := svc.buildDetail(context.Background(), repo.carpools[10], 1, CarpoolRoleManager, false)
+			require.NoError(t, err)
+			require.Len(t, detail.Members, 2)
+			require.InDelta(t, roundCarpoolUSD(tc.dailyCost), detail.Members[0].DailyUsageUSD, 1e-9)
+			require.Equal(t, sub.WeeklyUsageUSD, detail.Members[0].WeeklyUsageUSD)
+			require.Equal(t, 1439.3420698, sub.DailyUsageUSD, "读取统计不应改写订阅扣费计数器")
+			require.Zero(t, detail.Members[1].DailyUsageUSD)
+			if !tc.noLogs {
+				m := detail.Members[0]
+				require.Equal(t, 1034.36, m.Cost7dUSD)
+				require.Equal(t, int64(3), m.Requests7d)
+			}
+		})
+	}
 }
 
 func syncCarpool(t *testing.T, svc *CarpoolService, repo *fakeCarpoolRepo, id int64, now time.Time) *Carpool {
