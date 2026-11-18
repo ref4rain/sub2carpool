@@ -733,7 +733,7 @@
               <input
                 v-model.number="createForm.daily_limit_usd"
                 type="number"
-                step="0.01"
+                step="0.0001"
                 min="0"
                 class="input"
                 :placeholder="t('admin.groups.subscription.noLimit')"
@@ -746,7 +746,7 @@
               <input
                 v-model.number="createForm.weekly_limit_usd"
                 type="number"
-                step="0.01"
+                step="0.0001"
                 min="0"
                 class="input"
                 :placeholder="t('admin.groups.subscription.noLimit')"
@@ -759,7 +759,7 @@
               <input
                 v-model.number="createForm.monthly_limit_usd"
                 type="number"
-                step="0.01"
+                step="0.0001"
                 min="0"
                 class="input"
                 :placeholder="t('admin.groups.subscription.noLimit')"
@@ -2400,7 +2400,7 @@
               <input
                 v-model.number="editForm.daily_limit_usd"
                 type="number"
-                step="0.01"
+                step="0.0001"
                 min="0"
                 class="input"
                 :placeholder="t('admin.groups.subscription.noLimit')"
@@ -2413,7 +2413,7 @@
               <input
                 v-model.number="editForm.weekly_limit_usd"
                 type="number"
-                step="0.01"
+                step="0.0001"
                 min="0"
                 class="input"
                 :placeholder="t('admin.groups.subscription.noLimit')"
@@ -2426,7 +2426,7 @@
               <input
                 v-model.number="editForm.monthly_limit_usd"
                 type="number"
-                step="0.01"
+                step="0.0001"
                 min="0"
                 class="input"
                 :placeholder="t('admin.groups.subscription.noLimit')"

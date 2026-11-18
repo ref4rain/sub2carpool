@@ -171,8 +171,8 @@ type CarpoolRepository interface {
 	ListLiveGroupSubscriptions(ctx context.Context, groupID int64) (map[int64]int64, error)
 	// SetSubscriptionWeeklyLimit 写订阅级周限额覆盖，返回是否有变化
 	SetSubscriptionWeeklyLimit(ctx context.Context, subscriptionID int64, limit *float64) (bool, error)
-	// AlignSubscriptionWeeklyWindow 把订阅周窗口起点对齐到账号窗口起点 start（偏差小于 1 小时不动）；
-	// 起点早于 start 的订阅属于上一个账号窗口，同时清零周用量。返回是否有变化。
+	// AlignSubscriptionWeeklyWindow 按账号窗口 [start, start+7天) 的已计费日志重建周用量；
+	// 同窗口只补增，避免覆盖日志尚未落库的计费。返回是否有变化。
 	AlignSubscriptionWeeklyWindow(ctx context.Context, subscriptionID int64, start time.Time) (bool, error)
 
 	// GetGroupUsageByUser 统计分组内每个用户 [since, now) 的用量，
@@ -262,6 +262,14 @@ func carpoolWindowFromAccount(account *Account, now time.Time) *carpoolWindowSam
 	return &carpoolWindowSample{ResetAt: *seven.ResetsAt, UsedPercent: seven.Utilization}
 }
 
+// carpoolStableResetAt 保持同一账号窗口的统计边界稳定。
+func carpoolStableResetAt(c *Carpool, w *carpoolWindowSample) time.Time {
+	if !w.isNewWindow(c) {
+		return *c.WindowResetAt
+	}
+	return w.ResetAt
+}
+
 // isNewWindow 判断快照是否属于还没跟踪过的窗口。
 func (w *carpoolWindowSample) isNewWindow(c *Carpool) bool {
 	if c.WindowResetAt == nil {
@@ -277,4 +285,8 @@ func carpoolQuotaChanged(current, estimated float64) bool {
 		return estimated > 0
 	}
 	return math.Abs(estimated-current)/current >= carpoolQuotaChangeTolerance
+}
+
+func validCarpoolQuota(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0.0001
 }

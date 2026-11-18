@@ -276,24 +276,53 @@ func (r *carpoolRepository) SetSubscriptionWeeklyLimit(ctx context.Context, subs
 	return n > 0, err
 }
 
-// AlignSubscriptionWeeklyWindow 窗口起点早于账号窗口起点（再留 1 小时余量）的订阅属于上一个账号窗口，
-// 对齐时清零周用量；晚于账号窗口起点的（窗口内新加入、首次使用才开窗）只挪起点不清零。
+// AlignSubscriptionWeeklyWindow 按账号窗口重建订阅周用量，同时修复已对齐窗口的历史少计。
+// 同窗口只补增：计费先更新计数器，再异步写日志，不能用尚未写齐的日志降低计数器。
 func (r *carpoolRepository) AlignSubscriptionWeeklyWindow(ctx context.Context, subscriptionID int64, start time.Time) (bool, error) {
-	res, err := r.db.ExecContext(ctx, `
-		UPDATE user_subscriptions SET
-			weekly_usage_usd = CASE
-				WHEN weekly_window_start IS NULL OR weekly_window_start < $2::timestamptz - interval '1 hour' THEN 0
-				ELSE weekly_usage_usd END,
-			weekly_window_start = $2::timestamptz,
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var previous sql.NullTime
+	var userID, groupID int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT weekly_window_start, user_id, group_id FROM user_subscriptions
+		WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`, subscriptionID).Scan(&previous, &userID, &groupID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, service.ErrSubscriptionNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	// 每条请求按计费精度求和，使用 numeric 字符串避免浮点往返损失。
+	var logged string
+	err = tx.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(ROUND(actual_cost, 8)), 0) FROM usage_logs
+		WHERE subscription_id = $1 AND user_id = $2 AND group_id = $3 AND billing_type = 1
+		  AND created_at >= $4 AND created_at < $5 AND created_at <= NOW()`,
+		subscriptionID, userID, groupID, start, start.Add(7*24*time.Hour)).Scan(&logged)
+	if err != nil {
+		return false, err
+	}
+	sameWindow := previous.Valid && previous.Time.Equal(start)
+	res, err := tx.ExecContext(ctx, `
+		UPDATE user_subscriptions SET weekly_window_start = $2,
+			weekly_usage_usd = CASE WHEN $4 THEN GREATEST(weekly_usage_usd, $3::numeric) ELSE $3::numeric END,
 			updated_at = NOW()
-		WHERE id = $1
-		  AND (weekly_window_start IS NULL
-		       OR abs(extract(epoch FROM weekly_window_start - $2::timestamptz)) > 3600)`, subscriptionID, start)
+		WHERE id = $1 AND (weekly_window_start IS DISTINCT FROM $2::timestamptz
+			OR weekly_usage_usd < $3::numeric)`, subscriptionID, start, logged, sameWindow)
 	if err != nil {
 		return false, err
 	}
 	n, err := res.RowsAffected()
-	return n > 0, err
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func (r *carpoolRepository) SetMemberSubscription(ctx context.Context, carpoolID, userID, subscriptionID int64) error {

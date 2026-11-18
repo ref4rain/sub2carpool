@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -105,6 +106,7 @@ type fakeCarpoolSub struct {
 	limit       *float64
 	windowStart *time.Time
 	usage       float64
+	loggedUsage float64
 }
 
 type fakeCarpoolRepo struct {
@@ -238,17 +240,14 @@ func (r *fakeCarpoolRepo) SetSubscriptionWeeklyLimit(_ context.Context, subID in
 }
 func (r *fakeCarpoolRepo) AlignSubscriptionWeeklyWindow(_ context.Context, subID int64, start time.Time) (bool, error) {
 	s := r.subs[subID]
-	if s.windowStart != nil {
-		diff := s.windowStart.Sub(start)
-		if diff <= time.Hour && diff >= -time.Hour {
-			return false, nil
-		}
+	same := s.windowStart != nil && s.windowStart.Equal(start)
+	usage := s.loggedUsage
+	if same {
+		usage = math.Max(s.usage, usage)
 	}
-	if s.windowStart == nil || s.windowStart.Before(start.Add(-time.Hour)) {
-		s.usage = 0
-	}
-	s.windowStart = &start
-	return true, nil
+	changed := !same || usage != s.usage
+	s.windowStart, s.usage = &start, usage
+	return changed, nil
 }
 func (r *fakeCarpoolRepo) GetGroupUsageByUser(context.Context, int64, time.Time, time.Time) (map[int64]*CarpoolMemberUsage, error) {
 	if r.usage != nil {
@@ -517,15 +516,23 @@ func TestSyncLimits_AlignsMemberWindowsToAccount(t *testing.T) {
 	fresh := now.Add(-time.Hour)                   // 本窗口内首次使用才开窗
 	repo.subs[501].windowStart, repo.subs[501].usage = &stale, 12
 	repo.subs[502].windowStart, repo.subs[502].usage = &fresh, 5
+	repo.subs[501].loggedUsage, repo.subs[502].loggedUsage = 2.5, 7.25
 
 	syncCarpool(t, svc, repo, 10, now)
 	require.True(t, repo.subs[501].windowStart.Equal(accountStart))
 	require.True(t, repo.subs[502].windowStart.Equal(accountStart))
-	require.Zero(t, repo.subs[501].usage, "跨了账号窗口的用量清零")
-	require.Equal(t, 5.0, repo.subs[502].usage, "本窗口内的用量保留")
+	require.Equal(t, 2.5, repo.subs[501].usage, "向前对齐时重建目标窗口用量")
+	require.Equal(t, 7.25, repo.subs[502].usage, "向后对齐时补回遗漏用量")
+
+	// 上游重置时间抖动不会移动成员窗口或降低计数器。
+	admin.setWindow(40, resetAt.Add(-5*time.Minute))
+	syncCarpool(t, svc, repo, 10, now.Add(30*time.Second))
+	require.True(t, repo.subs[502].windowStart.Equal(accountStart))
+	require.Equal(t, 7.25, repo.subs[502].usage)
 
 	// 使用重置卡：账号重置时间提前到 7 天后，成员周用量一并清零
 	repo.subs[502].usage = 8
+	repo.subs[501].loggedUsage, repo.subs[502].loggedUsage = 0, 0
 	newReset := now.Add(7 * 24 * time.Hour).Truncate(time.Second)
 	admin.setWindow(0, newReset)
 	syncCarpool(t, svc, repo, 10, now.Add(time.Minute))
@@ -791,3 +798,39 @@ func TestRefreshEstimate_CountCurrentWindowStartsAtWindowStart(t *testing.T) {
 }
 
 func carpoolInt64(v int64) *int64 { return &v }
+
+func TestCarpoolDecimalQuotaEnforcement(t *testing.T) {
+	for _, amount := range []float64{0, -1, 0.00001, math.NaN(), math.Inf(1)} {
+		c := &Carpool{}
+		require.ErrorIs(t, applyCarpoolQuotaInput(c, &UpdateCarpoolQuotaInput{WeeklyQuotaUSD: &amount}), ErrCarpoolInvalidQuota)
+	}
+	amount := 2119.2657
+	c := &Carpool{Seats: 3}
+	require.NoError(t, applyCarpoolQuotaInput(c, &UpdateCarpoolQuotaInput{WeeklyQuotaUSD: &amount}))
+	require.Equal(t, amount, c.WeeklyQuotaUSD)
+	limit := c.MemberWeeklyLimit(25)
+	require.Equal(t, 529.8164, *limit)
+	sub := &UserSubscription{WeeklyLimitUSD: limit, WeeklyUsageUSD: 529.8163}
+	require.True(t, sub.CheckWeeklyLimit(&Group{}, 0.00001))
+	require.False(t, sub.CheckWeeklyLimit(&Group{}, 0.001))
+}
+
+func TestCarpoolReconcile_InvalidatesQuotaCacheAndKeepsResetAnchor(t *testing.T) {
+	svc, repo, admin, invalidated := newCarpoolTestService()
+	resetAt := time.Now().Add(3 * 24 * time.Hour).Truncate(time.Second)
+	c := repo.carpools[10]
+	c.WindowResetAt = &resetAt
+	start := resetAt.Add(-carpoolUpstreamWindow)
+	for _, sub := range repo.subs {
+		sub.windowStart = &start
+	}
+	repo.subs[501].usage, repo.subs[501].loggedUsage = 534.2712, 800.816
+	window := &carpoolWindowSample{ResetAt: resetAt.Add(-5 * time.Minute)}
+	require.NoError(t, svc.syncLimits(context.Background(), c, window))
+	require.Equal(t, []int64{1}, *invalidated, "repaired usage must invalidate the enforcement cache")
+	require.Equal(t, 800.816, repo.subs[501].usage)
+	admin.setWindow(80, window.ResetAt)
+	detail, err := svc.buildDetail(context.Background(), c, 0, "", false)
+	require.NoError(t, err)
+	require.True(t, detail.Members[0].WeeklyResetsAt.Equal(resetAt), "display uses the same reset anchor as billing")
+}

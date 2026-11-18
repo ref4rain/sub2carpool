@@ -58,7 +58,7 @@ export default {
   estimate: {
     title: 'Weekly quota estimate',
     estimated: 'Estimated account weekly quota',
-    sampleFormula: 'Spent ${cost} this window while the 7-day window rose {percent}%',
+    sampleFormula: 'Estimate sample spent ${cost} this window while the 7-day window rose {percent}%',
     sampleTooSmall: 'An estimate appears once the window rises {min}%; members are unlimited until then',
     newWindowKeep: 'Keeping the previous estimate until the new window rises {min}%',
     windowResetsAt: 'Account 7-day window resets',
@@ -69,12 +69,14 @@ export default {
     edit: 'Adjust quota',
     save: 'Save',
     saved: 'Quota updated',
+    quotaInvalid: 'Weekly quota must be at least USD 0.0001, with up to 4 decimal places',
     manualWeekly: 'Manual account weekly quota (USD, optional)',
     manualWeeklyHint: 'Leave empty to follow the automatic estimate',
     preview: 'Preview: account ${weekly}/week, ${perSeat}/week per seat'
   },
   members: {
     title: 'Member usage',
+    weeklyTotal: 'Member weekly total: {amount}; follows the account 7-day window and resets with it.',
     bindingHint: 'Seats follow carpool-group subscriptions: assigning one in Subscriptions takes a seat, revoking it frees the seat.',
     share: 'Quota share',
     shareSaved: 'Seat share updated',

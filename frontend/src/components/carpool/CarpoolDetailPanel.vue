@@ -154,7 +154,7 @@
           </label>
           <label class="block text-xs text-gray-600 dark:text-gray-300">
             {{ t('carpool.estimate.manualWeekly') }}
-            <input v-model="form.manual_weekly" type="number" min="0" step="0.01" class="input mt-1" />
+            <input v-model="form.manual_weekly" type="number" min="0.0001" step="0.0001" class="input mt-1" />
             <span class="mt-1 block text-[11px] text-gray-400">{{ t('carpool.estimate.manualWeeklyHint') }}</span>
           </label>
           <div class="flex justify-end gap-2">
@@ -171,6 +171,7 @@
         <div>
           <h3 class="font-semibold text-gray-900 dark:text-white">{{ t('carpool.members.title') }}</h3>
           <p class="mt-0.5 text-xs text-gray-400">{{ t('carpool.members.bindingHint') }}</p>
+          <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">{{ t('carpool.members.weeklyTotal', { amount: usd(memberWeeklyTotal) }) }}</p>
         </div>
         <slot name="members-toolbar" />
       </div>
@@ -320,6 +321,7 @@ const appStore = useAppStore()
 const carpool = computed(() => props.detail.carpool)
 const account = computed(() => props.detail.account)
 const estimate = computed(() => props.detail.estimate)
+const memberWeeklyTotal = computed(() => props.detail.members.reduce((sum, member) => sum + member.weekly_usage_usd, 0))
 const accountHealthy = computed(() => !!account.value && account.value.schedulable && account.value.status === 'active')
 
 const busy = ref(false)
@@ -408,6 +410,10 @@ function saveQuota() {
   const reserve = Number(form.reserve_percent)
   if (!Number.isFinite(reserve) || reserve < 0 || reserve >= 100) {
     appStore.showError(t('carpool.reserveRatioInvalid'))
+    return
+  }
+  if (form.manual_weekly !== '' && (manualWeekly.value == null || manualWeekly.value < 0.0001)) {
+    appStore.showError(t('carpool.estimate.quotaInvalid'))
     return
   }
   const req: CarpoolQuotaRequest = manualWeekly.value != null ? { weekly_quota_usd: manualWeekly.value } : { quota_source: 'auto' }

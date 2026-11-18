@@ -125,12 +125,12 @@
         </div>
         <label class="block text-sm text-gray-700 dark:text-gray-300">
           {{ t('carpool.estimate.manualWeekly') }}
-          <input v-model="createForm.manual_weekly" type="number" min="0" step="0.01" class="input mt-1" />
+          <input v-model="createForm.manual_weekly" type="number" min="0.0001" step="0.0001" class="input mt-1" />
           <span class="mt-1 block text-xs text-gray-400">{{ t('carpool.estimate.manualWeeklyHint') }}</span>
         </label>
         <label v-if="createManualWeekly == null" class="block text-sm text-gray-700 dark:text-gray-300">
           {{ t('carpool.admin.initialQuota') }}
-          <input v-model="createForm.initial_weekly" type="number" min="0" step="0.01" class="input mt-1" />
+          <input v-model="createForm.initial_weekly" type="number" min="0.0001" step="0.0001" class="input mt-1" />
           <span class="mt-1 block text-xs text-gray-400">{{ t('carpool.admin.initialQuotaHint') }}</span>
         </label>
         <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
@@ -304,6 +304,12 @@ async function openCreate() {
 }
 
 function submitCreate() {
+  for (const value of [createForm.manual_weekly, createForm.initial_weekly]) {
+    if (value !== '' && (!Number.isFinite(Number(value)) || Number(value) < 0.0001)) {
+      appStore.showError(t('carpool.estimate.quotaInvalid'))
+      return
+    }
+  }
   const emails = createForm.member_emails
     .split(/[\s,;]+/)
     .map((e) => e.trim())

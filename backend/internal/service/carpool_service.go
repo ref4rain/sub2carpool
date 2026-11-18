@@ -306,7 +306,7 @@ func (s *CarpoolService) syncLimits(ctx context.Context, c *Carpool, window *car
 			return err
 		}
 		if window != nil {
-			aligned, err := s.repo.AlignSubscriptionWeeklyWindow(ctx, *m.SubscriptionID, window.ResetAt.Add(-carpoolUpstreamWindow))
+			aligned, err := s.repo.AlignSubscriptionWeeklyWindow(ctx, *m.SubscriptionID, carpoolStableResetAt(c, window).Add(-carpoolUpstreamWindow))
 			if err != nil {
 				return err
 			}
@@ -535,13 +535,13 @@ func (s *CarpoolService) AdminCreate(ctx context.Context, input *CreateCarpoolIn
 	source := CarpoolQuotaSourceAuto
 	weekly := 0.0
 	if input.WeeklyQuotaUSD != nil {
-		if *input.WeeklyQuotaUSD <= 0 {
+		if !validCarpoolQuota(*input.WeeklyQuotaUSD) {
 			return nil, ErrCarpoolInvalidQuota
 		}
 		weekly = roundCarpoolUSD(*input.WeeklyQuotaUSD)
 		source = CarpoolQuotaSourceManual
 	} else if input.InitialWeeklyQuotaUSD != nil {
-		if *input.InitialWeeklyQuotaUSD <= 0 {
+		if !validCarpoolQuota(*input.InitialWeeklyQuotaUSD) {
 			return nil, ErrCarpoolInvalidQuota
 		}
 		weekly = roundCarpoolUSD(*input.InitialWeeklyQuotaUSD)
@@ -1224,7 +1224,7 @@ func applyCarpoolQuotaInput(c *Carpool, in *UpdateCarpoolQuotaInput) error {
 		c.QuotaSource = CarpoolQuotaSourceAuto
 		c.WeeklyQuotaUSD = c.EstimatedWeeklyUSD
 	case in.WeeklyQuotaUSD != nil:
-		if *in.WeeklyQuotaUSD <= 0 {
+		if !validCarpoolQuota(*in.WeeklyQuotaUSD) {
 			return ErrCarpoolInvalidQuota
 		}
 		c.WeeklyQuotaUSD = roundCarpoolUSD(*in.WeeklyQuotaUSD)
@@ -1320,9 +1320,9 @@ func (s *CarpoolService) buildDetail(ctx context.Context, c *Carpool, viewerID i
 				view.MonthlyUsageUSD = sub.MonthlyUsageUSD
 			}
 		}
-		// 成员周窗口对齐账号窗口，有上游快照时以它的重置时间为准
+		// 同一窗口使用持久化锚点，避免上游快照的分钟级抖动挪动统计边界。
 		if window != nil {
-			resetAt := window.ResetAt
+			resetAt := carpoolStableResetAt(c, window)
 			view.WeeklyResetsAt = &resetAt
 		}
 		if u := usage[m.UserID]; u != nil {

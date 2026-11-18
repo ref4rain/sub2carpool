@@ -58,7 +58,7 @@ export default {
   estimate: {
     title: '周额度预估',
     estimated: '预估账号周额度',
-    sampleFormula: '本窗口已花 ${cost}，账号 7 天窗口上涨 {percent}%',
+    sampleFormula: '预估样本已花 ${cost}，账号 7 天窗口上涨 {percent}%',
     sampleTooSmall: '窗口上涨满 {min}% 后生成预估，在此之前成员暂不限额',
     newWindowKeep: '新窗口上涨满 {min}% 前沿用上一次预估',
     windowResetsAt: '账号 7 天窗口重置',
@@ -69,12 +69,14 @@ export default {
     edit: '调整额度',
     save: '保存',
     saved: '额度已更新',
+    quotaInvalid: '周额度需不小于 0.0001 USD，最多支持 4 位小数',
     manualWeekly: '手动指定账号周额度（USD，可留空）',
     manualWeeklyHint: '留空则跟随自动预估',
     preview: '预览：账号周额度 ${weekly}，每人 ${perSeat}/周'
   },
   members: {
     title: '成员用量',
+    weeklyTotal: '成员本周合计 {amount}；按账号 7 天窗口统计，到账号窗口重置时清零。',
     bindingHint: '车位与拼车分组订阅绑定：在订阅管理里分配该分组订阅即占一个车位，撤销订阅即释放车位。',
     share: '额度比例',
     shareSaved: '车位比例已更新',
